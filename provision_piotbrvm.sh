@@ -68,6 +68,8 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-1100}"
 OTBR_TIMEOUT="${OTBR_TIMEOUT:-600}"
 THREAD_DATASET_TLV="${THREAD_DATASET_TLV:-}"
 SSH_KEY_FILE="${SSH_KEY_FILE:-}"
+RCP_FIRMWARE_URL="${RCP_FIRMWARE_URL:-https://raw.githubusercontent.com/farscapian/otbr-commissioner-stacks/main/cache/esp32/rcp/esp_ot_rcp.bin}"
+RCP_FLASH_ADDR="${RCP_FLASH_ADDR:-0x10000}"
 
 # ---------------------------------------------------------------------------
 # 1. Helpers
@@ -192,7 +194,7 @@ flash_rcp() {
     fi
 
     # -- Flash -----------------------------------------------------------------
-    local flash_addr="${RCP_FLASH_ADDR:-0x10000}"
+    local flash_addr="$RCP_FLASH_ADDR"
     info "Flashing $firmware → $port at $flash_addr ..."
     "$esptool" --chip esp32c6 --port "$port" --baud 460800 \
         write_flash "$flash_addr" "$firmware"
