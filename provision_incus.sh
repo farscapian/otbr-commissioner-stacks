@@ -165,8 +165,8 @@ flash_rcp() {
     info "Flashing $firmware → $port at $flash_addr ..."
     "$esptool" --chip esp32c6 --port "$port" --baud 460800 \
         write_flash "$flash_addr" "$firmware"
-    info "Flash complete — waiting for device to reset ..."
-    sleep 3
+    info "Flash complete — waiting for USB re-enumeration ..."
+    sleep 8
 }
 
 find_rcp() {
@@ -227,7 +227,7 @@ verify_rcp() {
     if [[ -z "$version" ]]; then
         warn "No spinel response from $port — RCP firmware not detected."
         if prompt_flash_rcp "$port" && flash_rcp "$port"; then
-            version=$(timeout 5 bash -c "
+            version=$(timeout 10 bash -c "
                 echo 'version' | python3 -W ignore '$spinel_cli' -u '$port' -b '$BAUD' 2>/dev/null \
                     | grep -i openthread || true
             ") || true

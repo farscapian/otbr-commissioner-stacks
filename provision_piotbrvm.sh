@@ -197,8 +197,8 @@ flash_rcp() {
     info "Flashing $firmware → $port at $flash_addr ..."
     "$esptool" --chip esp32c6 --port "$port" --baud 460800 \
         write_flash "$flash_addr" "$firmware"
-    info "Flash complete — waiting for device to reset ..."
-    sleep 3
+    info "Flash complete — waiting for USB re-enumeration ..."
+    sleep 8
 }
 
 # ---------------------------------------------------------------------------
