@@ -1,0 +1,35 @@
+# Cache — third-party downloads (images, snaps, sim binaries, firmware downloads)
+# These are large and can be re-downloaded; don't commit them.
+# Use cache/** (not cache/) so git traverses the tree for the exception below.
+cache/**
+
+# Exception: RCP firmware binary — small (~220KB), committed for URL stability
+# so scripts can reference it via raw.githubusercontent.com after push.
+!cache/esp32/
+!cache/esp32/rcp/
+!cache/esp32/rcp/esp_ot_rcp.bin
+
+# Generated VM artifacts
+artifacts/
+test-vm/vm-disk.qcow2
+test-vm/seed.iso
+test-vm/uefi-vars.fd
+test-vm/uefi-code.fd
+test-vm/user-data.yaml
+test-vm/test-vm-key
+test-vm/test-vm-key.pub
+
+
+# Syncthing conflict files
+*.sync-conflict-*
+
+# Active working env (may contain secrets); machine-specific *.env files are committed
+*.env
+
+# IDE
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
