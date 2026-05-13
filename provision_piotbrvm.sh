@@ -19,7 +19,6 @@ set -euo pipefail
 # 0. Bootstrap — root check + arg parsing + env file
 # ---------------------------------------------------------------------------
 
-[[ $EUID -eq 0 ]] || { echo "Must run as root (sudo)." >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_VM_DIR="${SCRIPT_DIR}/test-vm"
 PYSPINEL_VENV="${SCRIPT_DIR}/artifacts/pyspinel-venv"
@@ -249,7 +248,7 @@ check_host_deps() {
 
     warn "Missing host dependencies: ${missing_cmds[*]}"
     info "Installing via apt: ${missing_pkgs[*]}"
-    apt-get install -y "${missing_pkgs[@]}"
+    sudo apt-get install -y "${missing_pkgs[@]}"
 
     # Re-verify after install
     local still_missing=()
@@ -504,7 +503,7 @@ if [[ -z "$LOAD_SNAP" ]]; then
     fi
     pkill -TERM -f "qemu-system-aarch64" 2>/dev/null || true
     pkill -9   -f "qemu-system-aarch64" 2>/dev/null || true
-    ip link del macvtap-otbr 2>/dev/null || true
+    sudo ip link del macvtap-otbr 2>/dev/null || true
 
     for f in "${TEST_VM_DIR}/vm-disk.qcow2" "${TEST_VM_DIR}/uefi-vars.fd"; do
         if [[ -f "$f" ]]; then

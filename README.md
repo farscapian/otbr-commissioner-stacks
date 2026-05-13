@@ -1,12 +1,14 @@
-# raspi-ubuntucore-otbr
+# otbr-commissioner-stacks
 
-Flash a Raspberry Pi with Ubuntu Core 24 pre-configured as an
-[OpenThread Border Router](https://openthread.io/guides/border-router) (OTBR),
-using an ESP32-C6 as the Radio Co-Processor (RCP).
+Provision an [OpenThread Border Router](https://openthread.io/guides/border-router) (OTBR)
+across four deployment targets — all driven by the same `.env` file:
 
-A single script downloads the Ubuntu Core image, verifies it, flashes it to an
-SD card, and injects a cloud-init payload so the device is fully configured on
-first boot — no manual SSH or post-install steps required.
+| Script | Target | Runtime |
+|--------|--------|---------|
+| `flash-otbr-core.sh` | Raspberry Pi 4B (Ubuntu Core 24) | snap via cloud-init |
+| `otbr-snap-setup.sh` | Any Ubuntu bare-metal host | snap (live install) |
+| `otbr-docker-setup.sh` | Any Ubuntu bare-metal host | Docker CE + nginx |
+| `provision_piotbrvm.sh` / `provision_incus.sh` | QEMU / Incus VM | snap (for testing) |
 
 ## Hardware
 
@@ -204,6 +206,89 @@ Optional env vars (can go in `.env`):
 | `OTBR_TIMEOUT` | `600` | Seconds to wait for OTBR first-boot |
 | `SSH_PUBKEY` | _(auto-generated)_ | Inject your own public key into the VM |
 
+## Bare-metal snap (`otbr-snap-setup.sh`)
+
+Installs and configures the `openthread-border-router` snap on any Ubuntu
+Server or Desktop host (x86_64 or arm64) with a USB Thread radio attached.
+
+**Host requirements:** `snap`, `python3` (for pyspinel RCP verification)
+
+**Supported radios (auto-detected in priority order):**
+1. ESP32-C6 (Espressif USB vendor `303a`) → `/dev/ttyACM0`
+2. Sonoff Dongle-E / CP210x (Silicon Labs `10c4:ea60`) → `/dev/ttyUSB0`
+
+**What it does:**
+
+1. Loads `.env` and validates `THREAD_DATASET_TLV`.
+2. Adds the current user to the `dialout` group if needed (then exits — re-run after login).
+3. Loads and persists required kernel modules (`ip_set*`).
+4. Detects the USB Thread radio device.
+5. Verifies ESP32-C6 RCP firmware via pyspinel (skipped for Sonoff).
+6. Installs the snap from the store (if absent), sets `radio-url`, `infra-if`, `thread-if`, enables autostart, restarts the snap.
+7. Ensures all required snap interfaces are connected.
+8. Configures UFW rules for Thread/mDNS forwarding if UFW is active.
+9. Commits the Thread dataset and brings up the Thread interface.
+
+**Usage:**
+
+```bash
+./otbr-snap-setup.sh
+```
+
+Run as your normal user — `sudo` is invoked internally only where needed.
+
+Optional `.env` variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `INFRA_IF` | auto (default route interface) | Backbone network interface |
+| `THREAD_IF` | `wpan0` | Thread virtual interface name |
+
+## Bare-metal Docker (`otbr-docker-setup.sh`)
+
+Installs Docker CE, pulls `openthread/otbr:latest`, writes a stable udev
+symlink for the USB dongle, and sets up nginx as a reverse proxy — all on a
+plain Ubuntu Server or Desktop host.
+
+**Host requirements:** Ubuntu (Debian-based); run as root (`sudo`)
+
+**Supported radios:** Any USB serial Thread dongle identified by vendor/product/serial.
+
+**What it does:**
+
+1. Loads `.env` and validates dongle identification variables.
+2. Disables system sleep/suspend.
+3. Detects the backbone Ethernet interface on `192.168.4.x` (configurable via `TARGET_SUBNET` in the script).
+4. Loads and persists IPv6 kernel modules (`ip6table_filter`, `ip6_tables`).
+5. Writes `/etc/udev/rules.d/99-thread-dongle.rules` to create `/dev/ttyTHREAD`.
+6. Installs Docker CE from the official apt repository.
+7. Pulls the OTBR image and writes `/opt/otbr/otbr-agent` config.
+8. Launches the `otbr` container with `--privileged --network host`.
+9. Installs nginx and configures reverse proxies: REST API on `:8080`, web UI on `:8088`.
+10. Prompts for a Home Assistant IP and sets UFW rules.
+11. Commits the Thread dataset via `docker exec otbr ot-ctl`.
+
+**Usage:**
+
+```bash
+sudo ./otbr-docker-setup.sh
+```
+
+Required `.env` variables (in addition to `THREAD_DATASET_TLV`):
+
+| Variable | Purpose | How to find |
+|----------|---------|-------------|
+| `DONGLE_VENDOR` | USB vendor ID | `udevadm info /dev/ttyACM0 \| grep ID_VENDOR_ID` |
+| `DONGLE_PRODUCT` | USB product ID | `udevadm info /dev/ttyACM0 \| grep ID_MODEL_ID` |
+| `DONGLE_SERIAL` | USB serial string (unique) | `udevadm info /dev/ttyACM0 \| grep ID_SERIAL_SHORT` |
+
+Optional:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DONGLE_SYMLINK` | `ttyTHREAD` | Symlink name created under `/dev/` |
+| `BAUD_RATE` | `460800` | Serial baud rate passed to the OTBR agent |
+
 ## Partition layout (UC24 arm64+raspi)
 
 | Partition | Filesystem | Label | Purpose |
@@ -217,10 +302,11 @@ Optional env vars (can go in `.env`):
 
 | File | Purpose |
 |------|---------|
-| `flash-otbr-core.sh` | Main flash script |
-| `provision_piotbrvm.sh` | End-to-end QEMU test script |
-| `.env.example` | Environment variable template |
-| `cloud-init-out/` | Saved cloud-init artifacts from last run (for inspection) |
-| `ubuntu-core-24-arm64+raspi.img.xz` | Cached compressed image (created on first run) |
-| `ubuntu-core-24-arm64+raspi.img` | Cached extracted image (created on first run) |
-| `pyspinel-venv/` | Python venv with pyspinel (created by test script on first run) |
+| `flash-otbr-core.sh` | Flash Ubuntu Core 24 to SD card (Raspberry Pi) |
+| `otbr-snap-setup.sh` | Bare-metal snap provisioner (Ubuntu Server/Desktop) |
+| `otbr-docker-setup.sh` | Bare-metal Docker provisioner (Ubuntu Server/Desktop) |
+| `provision_piotbrvm.sh` | End-to-end QEMU aarch64 test |
+| `provision_incus.sh` | Incus VM/container test (faster, native x86_64) |
+| `pangolin.env` / `tvpc.env` | Example env files — copy to `.env` and edit |
+| `cache/` | Downloaded images, snaps, and firmware |
+| `artifacts/` | Generated cloud-init payloads and pyspinel venv |

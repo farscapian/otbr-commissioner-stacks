@@ -15,14 +15,15 @@
 #            Host-only; used for SSH from this machine (localhost:2222).
 #            MAC: 52:54:00:aa:bb:02  (fixed; matches netplan in user-data)
 #
-#   NOTE: MACVTAP requires root (or CAP_NET_ADMIN). The Linux kernel blocks
-#   direct host↔macvtap-child traffic, which is why we keep the NAT NIC for
-#   host SSH rather than trying to reach the VM's LAN IP from the same host.
+#   NOTE: MACVTAP creation requires CAP_NET_ADMIN (sudo). The tap character
+#   device is chowned to the calling user after creation so QEMU can open it
+#   without further privilege escalation. The Linux kernel blocks direct
+#   host↔macvtap-child traffic, which is why we keep the NAT NIC for host SSH.
 #
 # USAGE
-#   sudo ./run-vm.sh             # auto-detects physical RCP dongle
-#   sudo ./run-vm.sh --sim-rcp   # use simulated ot-rcp via socat PTY (no hardware)
-#   sudo ./run-vm.sh --no-usb    # skip USB passthrough entirely
+#   ./run-vm.sh             # auto-detects physical RCP dongle
+#   ./run-vm.sh --sim-rcp   # use simulated ot-rcp via socat PTY (no hardware)
+#   ./run-vm.sh --no-usb    # skip USB passthrough entirely
 #
 # EXIT
 #   Ctrl+C (or kill) tears down QEMU and removes the macvtap interface.
@@ -57,7 +58,6 @@ UEFI_FW="${SCRIPT_DIR}/uefi-code.fd"   # 64 MiB padded copy required by pflash
 [[ -f "$VM_DISK"    ]] || die "VM disk not found. Run setup.sh first."
 [[ -f "$SEED_ISO"   ]] || die "Seed ISO not found. Run setup.sh first."
 [[ -f "$UEFI_FW_SRC" ]] || die "UEFI firmware not found: install qemu-efi-aarch64."
-[[ $EUID -eq 0     ]] || die "Must run as root (sudo) — required for MACVTAP and USB passthrough."
 
 # pflash0 must be exactly 64 MiB; QEMU_EFI.fd is ~3 MiB raw — pad with zeros.
 if [[ ! -f "$UEFI_FW" ]]; then
@@ -82,7 +82,7 @@ cleanup() {
     [[ -n "$QEMU_PID" ]]     && kill "$QEMU_PID"     2>/dev/null || true
     [[ -n "$SIM_RCP_PID" ]]  && kill "$SIM_RCP_PID"  2>/dev/null || true
     [[ -n "$MACVTAP_FD" ]]   && { eval "exec ${MACVTAP_FD}>&-" 2>/dev/null || true; }
-    ip link del "$MACVTAP_NAME" 2>/dev/null || true
+    sudo ip link del "$MACVTAP_NAME" 2>/dev/null || true
     [[ -n "$MONITOR_SOCK" ]] && rm -f "$MONITOR_SOCK"
     rm -f "${SIM_PTY:-}"
 }
@@ -127,14 +127,17 @@ fi
 # Remove stale macvtap from a previous unclean exit
 if ip link show "$MACVTAP_NAME" &>/dev/null; then
     warn "Removing stale ${MACVTAP_NAME} ..."
-    ip link del "$MACVTAP_NAME"
+    sudo ip link del "$MACVTAP_NAME"
 fi
 
 info "Creating MACVTAP interface (${MACVTAP_NAME}, MAC ${LAN_MAC}) on ${HOST_IFACE} ..."
-ip link add link "$HOST_IFACE" name "$MACVTAP_NAME" address "$LAN_MAC" type macvtap mode bridge
-ip link set "$MACVTAP_NAME" up
+sudo ip link add link "$HOST_IFACE" name "$MACVTAP_NAME" address "$LAN_MAC" type macvtap mode bridge
+sudo ip link set "$MACVTAP_NAME" up
 
 MACVTAP_IDX=$(cat /sys/class/net/${MACVTAP_NAME}/ifindex)
+# Tap device is root-owned after creation; give the current user access so
+# QEMU (running unprivileged) can inherit the open fd.
+sudo chown "$(id -u):$(id -g)" "/dev/tap${MACVTAP_IDX}"
 
 # Open the tap character device; fd is inherited by QEMU after fork.
 # bash exec {var}<>file opens without O_CLOEXEC so the child inherits it.

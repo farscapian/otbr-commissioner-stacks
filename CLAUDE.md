@@ -31,6 +31,12 @@ sudo ./provision_incus.sh --container
 
 # Tear down Incus instance
 incus delete otbr-vm --force   # or otbr-ct
+
+# Docker on bare metal (Ubuntu Server/Desktop; installs Docker CE + nginx)
+sudo ./otbr-docker-setup.sh
+
+# Snap on bare metal (Ubuntu Server/Desktop; installs/configures openthread-border-router snap)
+./otbr-snap-setup.sh
 ```
 
 ## Environment setup
@@ -46,29 +52,55 @@ Scripts source the env file directly — no `export` or `sudo -E` needed.
 
 ### Relevant .env variables
 
-| Variable | Purpose |
-|----------|---------|
-| `THREAD_DATASET_TLV` | Thread Active Operational Dataset (hex). Required. |
-| `BOOT_TIMEOUT` | Seconds to wait for VM SSH (default: 1100) |
-| `OTBR_TIMEOUT` | Seconds to wait for OTBR first-boot (default: 600) |
-| `SSH_PUBKEY` | SSH public key to inject into VM |
-| `SSH_KEY_FILE` | Path to matching private key (required when SSH_PUBKEY is set) |
-| `RCP_FIRMWARE_PATH` | Path to ESP32-C6 RCP app binary (e.g. `cache/esp32/rcp/esp_ot_rcp.bin`) |
-| `RCP_FLASH_ADDR` | Flash offset for firmware binary (default: `0x10000` for app-only binary) |
-| `RCP_FIRMWARE_URL` | Download URL for RCP firmware (cached as `cache/esp32/rcp/rcp-firmware-cache.bin`) |
-| `SIM_RCP_BIN` | Path to pre-built `ot-rcp` simulation binary |
-| `SIM_RCP_URL` | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
-| `OT_REPO_PATH` | **Removed.** Build-from-source is gone; use `SIM_RCP_BIN`/`SIM_RCP_URL`. |
+| Variable | Scripts | Purpose |
+|----------|---------|---------|
+| `THREAD_DATASET_TLV` | all | Thread Active Operational Dataset (hex). Required. |
+| `BOOT_TIMEOUT` | piotbrvm | Seconds to wait for VM SSH (default: 1100) |
+| `OTBR_TIMEOUT` | piotbrvm | Seconds to wait for OTBR first-boot (default: 600) |
+| `SSH_PUBKEY` | flash, piotbrvm | SSH public key to inject into VM/image |
+| `SSH_KEY_FILE` | piotbrvm | Path to matching private key (required when SSH_PUBKEY is set) |
+| `RCP_FIRMWARE_PATH` | flash | Path to ESP32-C6 RCP app binary (e.g. `cache/esp32/rcp/esp_ot_rcp.bin`) |
+| `RCP_FLASH_ADDR` | flash | Flash offset for firmware binary (default: `0x10000` for app-only binary) |
+| `RCP_FIRMWARE_URL` | flash | Download URL for RCP firmware (cached as `cache/esp32/rcp/rcp-firmware-cache.bin`) |
+| `SIM_RCP_BIN` | piotbrvm | Path to pre-built `ot-rcp` simulation binary |
+| `SIM_RCP_URL` | piotbrvm | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
+| `DONGLE_VENDOR` | docker | USB vendor ID for Thread dongle (from `udevadm info`) |
+| `DONGLE_PRODUCT` | docker | USB product ID for Thread dongle |
+| `DONGLE_SERIAL` | docker | USB serial string for Thread dongle (unique; creates stable symlink) |
+| `DONGLE_SYMLINK` | docker | Symlink name under `/dev/` (default: `ttyTHREAD`) |
+| `BAUD_RATE` | docker | Serial baud rate (default: `460800`) |
+| `INFRA_IF` | snap | Backbone/infrastructure network interface (default: auto-detected) |
+| `THREAD_IF` | snap | Thread virtual interface (default: `wpan0`) |
+| `OT_REPO_PATH` | — | **Removed.** Build-from-source is gone; use `SIM_RCP_BIN`/`SIM_RCP_URL`. |
 
 ## Architecture
 
+Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variable:
+
+| Script | Target OS | Runtime | RCP detection |
+|--------|-----------|---------|---------------|
+| `flash-otbr-core.sh` | Ubuntu Core 24 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
+| `otbr-snap-setup.sh` | Ubuntu Server/Desktop (bare metal) | snap (live) | ESP32-C6 or Sonoff |
+| `otbr-docker-setup.sh` | Ubuntu Server/Desktop (bare metal) | Docker CE + nginx | any USB dongle via udev symlink |
+| `provision_piotbrvm.sh` / `provision_incus.sh` | QEMU/Incus VM (test) | snap | simulated or USB passthrough |
+
 - `flash-otbr-core.sh` — downloads UC24 image, verifies SHA-256, flashes to SD, injects cloud-init payload
+- `otbr-snap-setup.sh` — detects USB RCP, verifies Spinel firmware, installs and configures the OTBR snap; runs as normal user (`sudo` invoked internally)
+- `otbr-docker-setup.sh` — installs Docker CE, pulls `openthread/otbr`, writes udev rule for stable dongle symlink, sets up nginx reverse proxy, joins Thread network; requires root
 - `provision_piotbrvm.sh` — QEMU aarch64 end-to-end test; falls back to simulated RCP when no hardware present
 - `provision_incus.sh` — Incus VM or system container test (native x86_64, much faster)
 - `test-vm/` — VM setup and launch scripts used by `provision_piotbrvm.sh`
 - `incus/` — cloud-init template for Incus VM and container
 - `cache/` — all third-party downloaded content (see layout below)
 - `artifacts/` — generated shared artifacts (cloud-init output, pyspinel venv)
+
+### Docker architecture notes
+
+`otbr-docker-setup.sh` is designed for **any USB Thread dongle** (Sonoff, ESP32-C6, Silicon Labs, etc.). The dongle is identified by USB vendor/product/serial via udev, which creates a stable `/dev/ttyTHREAD` symlink. nginx exposes the OTBR REST API on `:8080` and the web UI on `:8088`, both proxied from the container's `127.0.0.1` ports.
+
+### Snap architecture notes
+
+`otbr-snap-setup.sh` prefers an **ESP32-C6** (Espressif vendor ID `303a`) and falls back to a Sonoff dongle (Silicon Labs `10c4:ea60`). It verifies RCP firmware via pyspinel before configuring the snap. The pyspinel venv is shared with other scripts at `artifacts/pyspinel-venv/`.
 
 ### Cache layout
 

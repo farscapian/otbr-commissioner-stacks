@@ -32,10 +32,8 @@
 set -exuo pipefail
 
 # ---------------------------------------------------------------------------
-# 0. Bootstrap — must run as root; auto-source .env if present
+# 0. Bootstrap — auto-source .env if present
 # ---------------------------------------------------------------------------
-
-[[ $EUID -eq 0 ]] || { echo "Must run as root (sudo)." >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 1. Configuration
@@ -116,7 +114,6 @@ require_cmd() {
 # 3. Pre-flight
 # ---------------------------------------------------------------------------
 
-[[ $EUID -eq 0 ]] || die "Must run as root (sudo)."
 require_cmd curl sha256sum xzcat dd lsblk partprobe python3 snap
 
 [[ -b "$TARGET_DEV" ]] || die "$TARGET_DEV is not a block device."
@@ -225,10 +222,10 @@ if [[ "$CLOUD_INIT_ONLY" -eq 0 ]]; then
     # -------------------------------------------------------------------------
 
     info "Flashing to $TARGET_DEV ..."
-    dd if="$IMAGE_IMG" of="$TARGET_DEV" bs=4M conv=fsync status=progress
+    sudo dd if="$IMAGE_IMG" of="$TARGET_DEV" bs=4M conv=fsync status=progress
     sync
     info "Flash complete. Re-reading partition table ..."
-    partprobe "$TARGET_DEV" 2>/dev/null || true
+    sudo partprobe "$TARGET_DEV" 2>/dev/null || true
     sleep 3
 
 fi  # CLOUD_INIT_ONLY
@@ -255,12 +252,13 @@ info "system-boot partition: $BOOT_PART"
 
 MOUNT_DIR=$(mktemp -d /tmp/uc-boot-XXXXXX)
 cleanup() {
-    umount "$MOUNT_DIR" 2>/dev/null || true
+    sudo umount "$MOUNT_DIR" 2>/dev/null || true
     rmdir  "$MOUNT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-mount "$BOOT_PART" "$MOUNT_DIR"
+# Mount with uid/gid so the normal user can write cloud-init files directly.
+sudo mount -o "uid=$(id -u),gid=$(id -g)" "$BOOT_PART" "$MOUNT_DIR"
 info "Mounted $BOOT_PART at $MOUNT_DIR"
 
 CI_DIR="${MOUNT_DIR}/cloud-init"
@@ -652,7 +650,7 @@ info "cloud-init artifacts saved to ${CI_ARTIFACT_DIR}/"
 # ---------------------------------------------------------------------------
 
 sync
-umount "$MOUNT_DIR"
+sudo umount "$MOUNT_DIR"
 rmdir  "$MOUNT_DIR"
 trap - EXIT
 
@@ -660,12 +658,12 @@ trap - EXIT
 while IFS= read -r _mp; do
     [[ -n "$_mp" ]] || continue
     info "Unmounting auto-mounted partition at: $_mp"
-    umount "$_mp" 2>/dev/null || warn "Could not unmount $_mp"
+    sudo umount "$_mp" 2>/dev/null || warn "Could not unmount $_mp"
 done < <(lsblk -no MOUNTPOINT "$TARGET_DEV" 2>/dev/null)
 sync
 
 if command -v eject &>/dev/null; then
-    eject "$TARGET_DEV" 2>/dev/null && info "Device ejected: $TARGET_DEV" || true
+    sudo eject "$TARGET_DEV" 2>/dev/null && info "Device ejected: $TARGET_DEV" || true
 fi
 
 info "============================================================"

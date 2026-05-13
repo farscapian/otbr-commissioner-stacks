@@ -30,7 +30,6 @@
 
 set -euo pipefail
 
-[[ $EUID -eq 0 ]] || { echo "Must run as root (sudo)." >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_VM_DIR="${SCRIPT_DIR}/test-vm"
 PYSPINEL_VENV="${SCRIPT_DIR}/artifacts/pyspinel-venv"
@@ -275,9 +274,9 @@ step "Checking host dependencies"
 command -v incus   &>/dev/null || die "incus not found. Install it: https://linuxcontainers.org/incus/docs/main/installing/"
 command -v curl    &>/dev/null || die "curl not found"
 command -v python3 &>/dev/null || die "python3 not found"
-command -v lsof    &>/dev/null || apt-get install -y lsof >/dev/null
+command -v lsof    &>/dev/null || sudo apt-get install -y lsof >/dev/null
 # envsubst for template processing
-command -v envsubst &>/dev/null || apt-get install -y gettext-base >/dev/null
+command -v envsubst &>/dev/null || sudo apt-get install -y gettext-base >/dev/null
 info "All host dependencies satisfied."
 
 # ---------------------------------------------------------------------------

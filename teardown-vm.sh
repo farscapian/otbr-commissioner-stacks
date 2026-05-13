@@ -5,8 +5,6 @@
 
 set -euo pipefail
 
-[[ $EUID -eq 0 ]] || { echo "Must run as root (sudo)." >&2; exit 1; }
-
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[1;33m'; NC='\033[0m'
 info() { echo -e "${GRN}[INFO]${NC}  $*"; }
 warn() { echo -e "${YLW}[WARN]${NC}  $*"; }
@@ -29,7 +27,7 @@ pkill -9 -f "qemu-system-aarch64" 2>/dev/null || true
 
 # Remove macvtap in case run-vm.sh's cleanup trap didn't fire
 if ip link show macvtap-otbr &>/dev/null 2>&1; then
-    ip link del macvtap-otbr
+    sudo ip link del macvtap-otbr
     info "Removed macvtap-otbr"
 fi
 
