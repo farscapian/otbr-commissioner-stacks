@@ -208,38 +208,49 @@ stop_otbr_if_running() {
 
 
 # ---------------------------------------------------------------------------
-# 7. Verify RCP firmware via spinel version query (ESP32-C6 only)
+# 7. Verify RCP firmware via raw HDLC spinel probe (ESP32-C6 only)
+# Sends PROP_VALUE_GET(PROP_NCP_VERSION) and checks for any HDLC response.
+# Uses only Python stdlib — no pyspinel dependency.
 # ---------------------------------------------------------------------------
 verify_rcp() {
     local port="$1"
 
     log "Verifying RCP firmware on $port via spinel..."
 
-    # Create pyspinel venv if missing
-    if [[ ! -f "$PYSPINEL_VENV/bin/activate" ]]; then
-        log "pyspinel venv not found — creating at $PYSPINEL_VENV..."
-        python3 -m venv "$PYSPINEL_VENV"
-        "$PYSPINEL_VENV/bin/pip" install --quiet pyspinel
-        log "pyspinel installed."
+    if python3 - "$port" "$BAUD" 2>/dev/null << 'PYEOF'
+import sys, os, struct, termios, tty, time
+port, baud_str = sys.argv[1], sys.argv[2]
+BAUD_MAP = {'460800': termios.B460800, '115200': termios.B115200, '921600': termios.B921600}
+baud = BAUD_MAP.get(baud_str, termios.B460800)
+HDLC_FLAG = 0x7E
+def fcs16(d):
+    c = 0xFFFF
+    for b in d:
+        c ^= b
+        for _ in range(8): c = (c >> 1) ^ 0x8408 if c & 1 else c >> 1
+    return c ^ 0xFFFF
+payload = bytes([0x80, 0x02, 0x02])
+raw = payload + struct.pack('<H', fcs16(payload))
+frame = bytearray([HDLC_FLAG])
+for b in raw:
+    if b in (0x7E, 0x7D): frame += bytes([0x7D, b ^ 0x20])
+    else: frame.append(b)
+frame.append(HDLC_FLAG)
+try:
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    a = termios.tcgetattr(fd); tty.setraw(fd)
+    a[4] = a[5] = baud; termios.tcsetattr(fd, termios.TCSANOW, a)
+    os.set_blocking(fd, True)
+    os.write(fd, bytes(frame)); time.sleep(1.0)
+    resp = os.read(fd, 256); os.close(fd)
+    sys.exit(0 if HDLC_FLAG in resp and len(resp) > 4 else 1)
+except: sys.exit(1)
+PYEOF
+    then
+        log "RCP firmware verified."
+    else
+        die "No spinel response from $port. Is RCP firmware built with CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y and set-target esp32c6?"
     fi
-
-    # shellcheck disable=SC1091
-    source "$PYSPINEL_VENV/bin/activate"
-    require spinel-cli.py
-
-    local version
-    version=$(timeout 5 bash -c "
-        echo 'version' | python3 -W ignore \$(which spinel-cli.py) -u '$port' -b '$BAUD' 2>/dev/null \
-            | grep -i openthread || true
-    ") || true
-
-    deactivate 2>/dev/null || true
-
-    if [[ -z "$version" ]]; then
-        die "No spinel response from $port. Is RCP firmware flashed with CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y?"
-    fi
-
-    log "RCP firmware verified: $version"
 }
 
 # ---------------------------------------------------------------------------

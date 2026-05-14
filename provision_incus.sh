@@ -197,6 +197,41 @@ find_rcp() {
     info "Using first: $RCP_DEVICE${RCP_VID:+ (${RCP_VID}:${RCP_PID})}"
 }
 
+# Raw HDLC spinel probe — sends PROP_VALUE_GET(PROP_NCP_VERSION) and checks
+# for any valid HDLC response. No pyspinel dependency; stdlib only.
+_probe_rcp() {
+    local port="$1" baud="$2"
+    python3 - "$port" "$baud" 2>/dev/null << 'PYEOF'
+import sys, os, struct, termios, tty, time
+port, baud_str = sys.argv[1], sys.argv[2]
+BAUD_MAP = {'460800': termios.B460800, '115200': termios.B115200, '921600': termios.B921600}
+baud = BAUD_MAP.get(baud_str, termios.B460800)
+HDLC_FLAG = 0x7E
+def fcs16(d):
+    c = 0xFFFF
+    for b in d:
+        c ^= b
+        for _ in range(8): c = (c >> 1) ^ 0x8408 if c & 1 else c >> 1
+    return c ^ 0xFFFF
+payload = bytes([0x80, 0x02, 0x02])
+raw = payload + struct.pack('<H', fcs16(payload))
+frame = bytearray([HDLC_FLAG])
+for b in raw:
+    if b in (0x7E, 0x7D): frame += bytes([0x7D, b ^ 0x20])
+    else: frame.append(b)
+frame.append(HDLC_FLAG)
+try:
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    a = termios.tcgetattr(fd); tty.setraw(fd)
+    a[4] = a[5] = baud; termios.tcsetattr(fd, termios.TCSANOW, a)
+    os.set_blocking(fd, True)
+    os.write(fd, bytes(frame)); time.sleep(1.0)
+    resp = os.read(fd, 256); os.close(fd)
+    sys.exit(0 if HDLC_FLAG in resp and len(resp) > 4 else 1)
+except: sys.exit(1)
+PYEOF
+}
+
 verify_rcp() {
     local port="$1"
     info "Verifying RCP firmware on $port via spinel..."
@@ -211,39 +246,23 @@ verify_rcp() {
         return 0
     fi
 
-    if [[ ! -f "$PYSPINEL_VENV/bin/spinel-cli.py" ]]; then
-        info "Installing pyspinel venv ..."
-        python3 -m venv "$PYSPINEL_VENV"
-        "$PYSPINEL_VENV/bin/pip" install --quiet pyspinel
-    fi
-
-    local spinel_cli="$PYSPINEL_VENV/bin/spinel-cli.py"
-    local version
-    version=$(timeout 5 bash -c "
-        echo 'version' | python3 -W ignore '$spinel_cli' -u '$port' -b '$BAUD' 2>/dev/null \
-            | grep -i openthread || true
-    ") || true
-
-    if [[ -z "$version" ]]; then
-        warn "No spinel response from $port — RCP firmware not detected."
-        if prompt_flash_rcp "$port" && flash_rcp "$port"; then
-            version=$(timeout 10 bash -c "
-                echo 'version' | python3 -W ignore '$spinel_cli' -u '$port' -b '$BAUD' 2>/dev/null \
-                    | grep -i openthread || true
-            ") || true
-            if [[ -z "$version" ]]; then
-                warn "Still no spinel response — falling back to sim."
-                RCP_DEVICE=""
-            else
-                info "RCP verified after flash: $version"
-            fi
-        else
-            warn "Skipping flash — using sim."
-            RCP_DEVICE=""
-        fi
+    if _probe_rcp "$port" "$BAUD"; then
+        info "RCP firmware verified."
         return 0
     fi
-    info "RCP firmware verified: $version"
+
+    warn "No spinel response from $port — RCP firmware not detected."
+    if prompt_flash_rcp "$port" && flash_rcp "$port"; then
+        if _probe_rcp "$port" "$BAUD"; then
+            info "RCP firmware verified after flash."
+        else
+            warn "Still no spinel response — falling back to sim."
+            RCP_DEVICE=""
+        fi
+    else
+        warn "Skipping flash — using sim."
+        RCP_DEVICE=""
+    fi
 }
 
 # ---------------------------------------------------------------------------
