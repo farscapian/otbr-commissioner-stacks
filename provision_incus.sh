@@ -30,7 +30,7 @@
 
 set -euox pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TEST_VM_DIR="${SCRIPT_DIR}/test-vm"
 PYSPINEL_VENV="${SCRIPT_DIR}/artifacts/pyspinel-venv"
 INCUS_DIR="${SCRIPT_DIR}/incus"
