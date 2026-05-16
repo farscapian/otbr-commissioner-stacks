@@ -438,35 +438,22 @@ incus init images:ubuntu/24.04 "$INSTANCE_NAME" $TYPE_FLAG \
 
 step "Attaching disk shares"
 
-# Incus AppArmor policy blocks /home paths as disk sources; stage to /var/tmp/
-# chmod 755 so the Incus daemon can stat the directory (mktemp defaults to 700)
-INCUS_STAGE_DIR=$(mktemp -d /var/tmp/otbr-incus-XXXXXX)
-chmod 755 "$INCUS_STAGE_DIR"
-trap 'rm -rf "$INCUS_STAGE_DIR"' EXIT
-
-cp -r "$SNAP_CACHE" "${INCUS_STAGE_DIR}/snap"
-SNAP_CACHE_STAGE="${INCUS_STAGE_DIR}/snap"
-
-SIM_RCP_STAGE="${INCUS_STAGE_DIR}/ot-rcp-sim"
-mkdir -p "$SIM_RCP_STAGE"
-[[ -f "${SIM_RCP_DIR}/ot-rcp" ]] && cp "${SIM_RCP_DIR}/ot-rcp" "$SIM_RCP_STAGE/"
-
 if [[ "$INSTANCE_MODE" == "vm" ]]; then
-    # VM: virtiofs — no path arg; mount tag = device name
+    # VM: virtiofs — source is shared by host; mount tag = device name
     incus config device add "$INSTANCE_NAME" snap_cache disk \
-        source="${SNAP_CACHE_STAGE}" readonly=true
+        source="${SNAP_CACHE}" readonly=true
     [[ -z "${RCP_DEVICE:-}" ]] && \
         incus config device add "$INSTANCE_NAME" ot_rcp_sim disk \
-        source="${SIM_RCP_STAGE}" readonly=true
-    info "virtiofs shares: snap_cache${RCP_DEVICE:+} ot_rcp_sim"
+        source="${SIM_RCP_DIR}" readonly=true
+    info "virtiofs shares: snap_cache  ot_rcp_sim"
 else
     # Container: bind-mount — path arg sets the mount point inside the container
     incus config device add "$INSTANCE_NAME" snap_cache disk \
-        source="${SNAP_CACHE_STAGE}" path=/mnt/snap-cache readonly=true
+        source="${SNAP_CACHE}" path=/mnt/snap-cache readonly=true
     [[ -z "${RCP_DEVICE:-}" ]] && \
         incus config device add "$INSTANCE_NAME" ot_rcp_sim disk \
-        source="${SIM_RCP_STAGE}" path=/mnt/ot-rcp-sim readonly=true
-    info "bind-mounts: snap_cache${RCP_DEVICE:+} ot_rcp_sim"
+        source="${SIM_RCP_DIR}" path=/mnt/ot-rcp-sim readonly=true
+    info "bind-mounts: snap_cache  ot_rcp_sim"
 fi
 
 # ---------------------------------------------------------------------------
