@@ -3,8 +3,7 @@
 # provision_incus.sh
 #
 # Provision an Incus VM or system container running the OTBR first-boot
-# sequence. Functionally equivalent to provision_piotbrvm.sh (QEMU) but runs
-# native x86_64 — much faster, no emulation overhead.
+# sequence. Supports native x86_64 and QEMU-emulated arm64.
 #
 # USAGE
 #   sudo ./provision_incus.sh [options]
@@ -12,7 +11,9 @@
 # OPTIONS
 #   --vm              Launch an Incus VM (default)
 #   --container       Launch a system container instead of a VM
-#   --name=NAME       Instance name (default: otbr-vm or otbr-ct)
+#   --arch=arm64      Use arm64 image (QEMU-emulated; default: amd64)
+#   --arm64           Shorthand for --arch=arm64
+#   --name=NAME       Instance name (default: otbrvm64 / otbrarm64 / otbr-ct)
 #   --env-file=PATH   Path to env file (default: $(hostname).env)
 #   --reprovision     Delete existing instance and provision from scratch
 #
@@ -28,7 +29,7 @@
 #   cannot stat paths under /home, so source-path validation always fails.
 # =============================================================================
 
-set -euox pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TEST_VM_DIR="${SCRIPT_DIR}/test-vm"
@@ -41,6 +42,7 @@ BAUD=460800
 # ---------------------------------------------------------------------------
 
 INSTANCE_MODE="vm"
+INSTANCE_ARCH="amd64"
 INSTANCE_NAME=""
 _ENV_FILE=""
 REPROVISION=0
@@ -49,6 +51,8 @@ for _arg in "$@"; do
     case "$_arg" in
         --vm)           INSTANCE_MODE="vm" ;;
         --container)    INSTANCE_MODE="container" ;;
+        --arm64)        INSTANCE_ARCH="arm64" ;;
+        --arch=*)       INSTANCE_ARCH="${_arg#--arch=}" ;;
         --name=*)       INSTANCE_NAME="${_arg#--name=}" ;;
         --env-file=*)   _ENV_FILE="${_arg#--env-file=}" ;;
         --reprovision)  REPROVISION=1 ;;
@@ -56,7 +60,18 @@ for _arg in "$@"; do
     esac
 done
 
-[[ -z "$INSTANCE_NAME" ]] && INSTANCE_NAME="$([[ $INSTANCE_MODE == vm ]] && echo otbrvm64 || echo otbr-ct)"
+if [[ -z "$INSTANCE_NAME" ]]; then
+    if [[ "$INSTANCE_MODE" == "vm" && "$INSTANCE_ARCH" == "arm64" ]]; then
+        INSTANCE_NAME="otbrarm64"
+    elif [[ "$INSTANCE_MODE" == "vm" ]]; then
+        INSTANCE_NAME="otbrvm64"
+    else
+        INSTANCE_NAME="otbr-ct"
+    fi
+fi
+
+# All incus instance-level commands use the local: remote explicitly.
+INST="local:${INSTANCE_NAME}"
 
 if [[ -n "$_ENV_FILE" ]]; then
     [[ -f "$_ENV_FILE" ]] || { echo "env file not found: $_ENV_FILE" >&2; exit 1; }
@@ -285,7 +300,7 @@ else
         || die "THREAD_DATASET_TLV must be a hex string"
     info "THREAD_DATASET_TLV is set (${#THREAD_DATASET_TLV} chars)"
 fi
-info "Mode: $INSTANCE_MODE  Name: $INSTANCE_NAME"
+info "Mode: $INSTANCE_MODE  Arch: $INSTANCE_ARCH  Name: $INSTANCE_NAME"
 info "BOOT_TIMEOUT=${BOOT_TIMEOUT}s  OTBR_TIMEOUT=${OTBR_TIMEOUT}s"
 
 # Scope all incus commands to this project (INCUS_PROJECT is honoured by the CLI)
@@ -361,7 +376,7 @@ if [[ -z "${RCP_DEVICE:-}" ]]; then
         chmod +x "$SIM_RCP_BIN_PATH"
     else
         die "No sim binary available. Set one of these in your .env:
-  SIM_RCP_BIN=/path/to/ot-rcp        (local Linux x86_64 binary)
+  SIM_RCP_BIN=/path/to/ot-rcp        (local Linux binary matching instance arch: ${INSTANCE_ARCH})
   SIM_RCP_URL=https://...ot-rcp       (download URL)
 Build from source: cd openthread && ./script/cmake-build simulation
   Binary: build/simulation/examples/apps/ncp/ot-rcp"
@@ -392,13 +407,13 @@ fi
 
 if [[ "$REPROVISION" -eq 1 ]]; then
     step "Reprovisioning — deleting existing instance"
-    if incus info "$INSTANCE_NAME" &>/dev/null; then
-        incus delete "$INSTANCE_NAME" --force
+    if incus info "$INST" &>/dev/null; then
+        incus delete "$INST" --force
         info "Deleted instance: $INSTANCE_NAME"
     else
         info "No existing instance named $INSTANCE_NAME"
     fi
-elif incus info "$INSTANCE_NAME" &>/dev/null; then
+elif incus info "$INST" &>/dev/null; then
     warn "Instance '$INSTANCE_NAME' already exists."
     warn "Use --reprovision to delete and reprovision, or --name=NAME to use a different name."
     exit 1
@@ -414,23 +429,35 @@ USER_DATA=$(THREAD_DATASET_TLV="$THREAD_DATASET_TLV" \
     envsubst '${THREAD_DATASET_TLV}' \
     < "${INCUS_DIR}/user-data.yaml.tpl")
 
-info "User-data generated ($(echo "$USER_DATA" | wc -l) lines)"
+_TS="$(date +%Y%m%d-%H%M%S)"
+_ARTIFACT_SUBDIR="$([[ $INSTANCE_ARCH == arm64 ]] && echo arm64vm || echo x64vm)"
+_ARTIFACT_DIR="${SCRIPT_DIR}/artifacts/${_ARTIFACT_SUBDIR}/${INSTANCE_NAME}/${_TS}"
+mkdir -p "$_ARTIFACT_DIR"
+echo "$USER_DATA" > "${_ARTIFACT_DIR}/user-data.yaml"
+info "User-data saved to ${_ARTIFACT_DIR}/user-data.yaml ($(echo "$USER_DATA" | wc -l) lines)"
+unset _TS _ARTIFACT_SUBDIR _ARTIFACT_DIR
 
 # ---------------------------------------------------------------------------
 # 8. Init instance
 # ---------------------------------------------------------------------------
 
-step "Creating Incus $INSTANCE_MODE: $INSTANCE_NAME"
+step "Creating Incus $INSTANCE_MODE ($INSTANCE_ARCH): $INSTANCE_NAME"
 
 TYPE_FLAG="$([[ $INSTANCE_MODE == vm ]] && echo "--vm" || echo "")"
 
+if [[ "$INSTANCE_ARCH" == "arm64" ]]; then
+    INCUS_IMAGE="ubuntu:26.04/arm64"
+else
+    INCUS_IMAGE="ubuntu:26.04"
+fi
+
 # shellcheck disable=SC2086
-incus init ubuntu:26.04 "$INSTANCE_NAME" $TYPE_FLAG \
+incus init "$INCUS_IMAGE" "$INST" $TYPE_FLAG \
     --config "user.user-data=${USER_DATA}"
 
 # security.nesting lets snapd manage systemd services inside a container
 [[ "$INSTANCE_MODE" == "container" ]] && \
-    incus config set "$INSTANCE_NAME" security.nesting=true
+    incus config set "$INST" security.nesting=true
 
 # ---------------------------------------------------------------------------
 # 9. Attach RCP device (real hardware only)
@@ -442,12 +469,12 @@ if [[ -n "${RCP_DEVICE:-}" ]]; then
         # VM: USB passthrough by vendor:product ID
         [[ -n "$RCP_VID" && -n "$RCP_PID" ]] \
             || die "Cannot determine USB VID:PID for $RCP_DEVICE — cannot pass through to VM."
-        incus config device add "$INSTANCE_NAME" rcp usb \
+        incus config device add "$INST" rcp usb \
             vendorid="$RCP_VID" productid="$RCP_PID"
         info "USB passthrough: ${RCP_VID}:${RCP_PID}"
     else
         # Container: character device bind
-        incus config device add "$INSTANCE_NAME" rcp unix-char \
+        incus config device add "$INST" rcp unix-char \
             source="$RCP_DEVICE" path="$RCP_DEVICE"
         info "Character device: $RCP_DEVICE"
     fi
@@ -458,7 +485,7 @@ fi
 # ---------------------------------------------------------------------------
 
 step "Starting instance"
-incus start "$INSTANCE_NAME"
+incus start "$INST"
 info "Instance started."
 
 # ---------------------------------------------------------------------------
@@ -472,16 +499,16 @@ step "Injecting snap cache and sim binary (timeout ${BOOT_TIMEOUT}s)"
 
 DEADLINE=$(( SECONDS + BOOT_TIMEOUT ))
 while (( SECONDS < DEADLINE )); do
-    incus exec "$INSTANCE_NAME" -- true 2>/dev/null && break || sleep 2
+    incus exec "$INST" -- true 2>/dev/null && break || sleep 2
 done
 (( SECONDS < DEADLINE )) || die "Timed out waiting for instance exec to become available."
 
-incus exec "$INSTANCE_NAME" -- mkdir -p /root/snap-cache /root/ot-rcp-sim
+incus exec "$INST" -- mkdir -p /root/snap-cache /root/ot-rcp-sim
 
 _snap_pushed=0
 for _f in "${SNAP_CACHE}"/*.snap "${SNAP_CACHE}"/*.assert; do
     [[ -f "$_f" ]] || continue
-    incus file push "$_f" "${INSTANCE_NAME}/root/snap-cache/$(basename "$_f")"
+    incus file push "$_f" "${INST}/root/snap-cache/$(basename "$_f")"
     _snap_pushed=1
 done
 [[ "$_snap_pushed" -eq 1 ]] && info "Snap cache pushed to instance." \
@@ -490,7 +517,7 @@ unset _f _snap_pushed
 
 if [[ -z "${RCP_DEVICE:-}" && -f "${SIM_RCP_BIN_PATH}" ]]; then
     incus file push --mode 0755 "${SIM_RCP_BIN_PATH}" \
-        "${INSTANCE_NAME}/root/ot-rcp-sim/ot-rcp"
+        "${INST}/root/ot-rcp-sim/ot-rcp"
     info "Sim binary pushed to /root/ot-rcp-sim/ot-rcp"
 fi
 
@@ -501,7 +528,7 @@ fi
 step "Waiting for cloud-init (timeout ${BOOT_TIMEOUT}s)"
 
 if timeout "$BOOT_TIMEOUT" \
-        incus exec "$INSTANCE_NAME" -- cloud-init status --wait --long; then
+        incus exec "$INST" -- cloud-init status --wait --long; then
     info "cloud-init complete."
 else
     rc=$?
@@ -534,7 +561,7 @@ tail -f "$log" | while IFS= read -r line; do
 done
 '
 
-if timeout "$OTBR_TIMEOUT" incus exec "$INSTANCE_NAME" -- bash -c "$REMOTE_CMD"; then
+if timeout "$OTBR_TIMEOUT" incus exec "$INST" -- bash -c "$REMOTE_CMD"; then
     true
 else
     rc=$?
@@ -548,7 +575,7 @@ fi
 
 step "Verifying Thread interface"
 
-THREAD_STATE=$(incus exec "$INSTANCE_NAME" -- \
+THREAD_STATE=$(incus exec "$INST" -- \
     snap run openthread-border-router.ot-ctl state 2>/dev/null || echo "unavailable")
 
 info "ot-ctl state: $THREAD_STATE"
@@ -559,7 +586,7 @@ case "$THREAD_STATE" in
         ;;
     *)
         warn "Thread state is '${THREAD_STATE}' — may still be joining."
-        warn "Check manually: incus exec $INSTANCE_NAME -- snap run openthread-border-router.ot-ctl state"
+        warn "Check manually: incus exec local:$INSTANCE_NAME -- snap run openthread-border-router.ot-ctl state"
         ;;
 esac
 
@@ -569,7 +596,7 @@ esac
 
 echo
 pass "Provisioning complete. Instance is running."
-info "Shell:    incus shell $INSTANCE_NAME"
-info "Log:      incus exec $INSTANCE_NAME -- tail -f /var/log/otbr-firstboot.log"
-info "ot-ctl:   incus exec $INSTANCE_NAME -- snap run openthread-border-router.ot-ctl state"
-info "Teardown: incus delete $INSTANCE_NAME --force"
+info "Shell:    incus shell local:$INSTANCE_NAME"
+info "Log:      incus exec local:$INSTANCE_NAME -- tail -f /var/log/otbr-firstboot.log"
+info "ot-ctl:   incus exec local:$INSTANCE_NAME -- snap run openthread-border-router.ot-ctl state"
+info "Teardown: incus delete local:$INSTANCE_NAME --force"
