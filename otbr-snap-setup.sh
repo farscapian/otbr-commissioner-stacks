@@ -3,7 +3,7 @@
 # Detects ESP32 RCP device, verifies spinel firmware, configures and restarts OTBR snap.
 # Run as normal user — sudo is invoked only when needed for snap commands.
 
-set -euox pipefail
+set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # 1. Configuration

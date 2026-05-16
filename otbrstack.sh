@@ -15,8 +15,8 @@ otbrstack() {
                     "$_OTBRSTACK_DIR/provision_incus.sh" "${@:3}"
                     ;;
                 arm64|aarch64)
-                    echo "[otbrstack] QEMU aarch64 (Raspberry Pi 4 sim)  (scripts: ${_OTBRSTACK_DIR})"
-                    "$_OTBRSTACK_DIR/provision_piotbrvm.sh" "${@:3}"
+                    echo "[otbrstack] Incus VM (arm64)  (scripts: ${_OTBRSTACK_DIR})"
+                    "$_OTBRSTACK_DIR/provision_incus.sh" --arch=arm64 "${@:3}"
                     ;;
                 *)
                     echo "Usage: otbrstack vm <x64|arm64> [extra args]"
@@ -73,7 +73,7 @@ otbrstack() {
             echo "Usage: otbrstack <command> [args]"
             echo ""
             echo "  vm x64        Incus VM test (native x86_64)"
-            echo "  vm arm64      QEMU aarch64 test (Raspberry Pi 4 sim)"
+            echo "  vm arm64      Incus VM (arm64)"
             echo "  flash         Flash Ubuntu Server 26.04 to SD card (needs /dev/sdX)"
             echo "  docker        Docker bare-metal provisioner"
             echo "  snap          Snap bare-metal provisioner"

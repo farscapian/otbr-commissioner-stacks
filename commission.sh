@@ -15,7 +15,6 @@
 #   SSH_HOST              Target hostname or IP             (default: localhost)
 #   SSH_PORT              SSH port                          (default: 22)
 #   SSH_USER              SSH username                      (default: ubuntu)
-#   SSH_KEY_FILE          Path to SSH private key           (optional)
 #
 #   chip-tool only:
 #   MATTER_NODE_ID        Logical node ID to assign         (default: 1)
@@ -78,7 +77,6 @@ unset _ENV_FILE
 SSH_HOST="${SSH_HOST:-localhost}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_USER="${SSH_USER:-ubuntu}"
-SSH_KEY_FILE="${SSH_KEY_FILE:-}"
 
 SSH_OPTS=(
     -p "$SSH_PORT"
@@ -88,7 +86,6 @@ SSH_OPTS=(
     -o ConnectTimeout=10
     -o BatchMode=yes
 )
-[[ -n "$SSH_KEY_FILE" ]] && SSH_OPTS+=(-i "$SSH_KEY_FILE")
 
 remote() { ssh "${SSH_OPTS[@]}" "${SSH_USER}@${SSH_HOST}" "$@"; }
 

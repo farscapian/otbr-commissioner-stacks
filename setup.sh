@@ -21,14 +21,11 @@ warn()    { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 # 1. apt packages
 # ---------------------------------------------------------------------------
 # Covers every script in the repo:
-#   flash-piotbr.sh   : curl sha256sum xzcat(xz-utils) dd lsblk partprobe(parted) python3
-#   provision_piotbrvm.sh: qemu-system-aarch64(qemu-system-arm) qemu-img(qemu-utils)
-#                          cloud-localds(cloud-image-utils) envsubst(gettext-base) socat lsof
+#   flash-piotbr.sh      : curl sha256sum xzcat(xz-utils) dd lsblk partprobe(parted) python3
 #   provision_incus.sh   : incus (not in apt — skipped; see note below), curl python3 lsof
 #                          envsubst(gettext-base)
 #   otbr-docker-setup.sh : installs Docker CE itself; needs curl ca-certificates gnupg
 #   otbr-snap-setup.sh   : python3 lsof (ufw optional; checked at runtime)
-#   teardown-vm.sh / run-vm.sh: iproute2 (ip) — usually pre-installed
 
 APT_PKGS=(
     # core utilities
@@ -46,15 +43,6 @@ APT_PKGS=(
     # disk / flashing
     parted         # partprobe
     util-linux     # lsblk, dd
-
-    # QEMU (arm64 VM path)
-    qemu-system-arm
-    qemu-utils
-    qemu-efi-aarch64
-    cloud-image-utils  # cloud-localds
-
-    # SSH client (piotbrvm polling)
-    openssh-client
 )
 
 install_apt_packages() {
