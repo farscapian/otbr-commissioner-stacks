@@ -1,6 +1,6 @@
 #cloud-config
 
-# Ubuntu Server 24.04 arm64 (QEMU virt) adaptation of flash-piotbr.sh cloud-init.
+# Ubuntu Server 26.04 arm64 (QEMU virt) adaptation of flash-piotbr.sh cloud-init.
 # Differences from the raspi image:
 #   - No WiFi (QEMU virt has no wireless NIC)
 #   - Dual NIC: LAN via MACVTAP (MAC 52:54:00:aa:bb:01, real router DHCP, metric 100)

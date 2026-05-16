@@ -425,7 +425,7 @@ step "Creating Incus $INSTANCE_MODE: $INSTANCE_NAME"
 TYPE_FLAG="$([[ $INSTANCE_MODE == vm ]] && echo "--vm" || echo "")"
 
 # shellcheck disable=SC2086
-incus init ubuntu:24.04 "$INSTANCE_NAME" $TYPE_FLAG \
+incus init ubuntu:26.04 "$INSTANCE_NAME" $TYPE_FLAG \
     --config "user.user-data=${USER_DATA}"
 
 # security.nesting lets snapd manage systemd services inside a container

@@ -1,6 +1,6 @@
 #cloud-config
 
-# Ubuntu Server 24.04 amd64 cloud-init for Incus VM and system container.
+# Ubuntu Server 26.04 amd64 cloud-init for Incus VM and system container.
 # Differences from the QEMU (test-vm) variant:
 #   - Networking managed by Incus; no custom netplan or dual-NIC setup needed
 #   - sim-rcp runs INSIDE the instance (native x86_64), no host PTY bridge required

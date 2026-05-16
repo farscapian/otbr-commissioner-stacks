@@ -47,15 +47,15 @@ fi
 info "Host dependencies satisfied."
 
 # ---------------------------------------------------------------------------
-# 2. Download Ubuntu 24.04 Server arm64 cloud image
+# 2. Download Ubuntu 26.04 Server arm64 cloud image
 # ---------------------------------------------------------------------------
 
 mkdir -p "${PROJECT_ROOT}/cache/ubuntu/server"
-BASE_IMAGE="${PROJECT_ROOT}/cache/ubuntu/server/noble-server-cloudimg-arm64.img"
-BASE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img"
+BASE_IMAGE="${PROJECT_ROOT}/cache/ubuntu/server/resolute-server-cloudimg-arm64.img"
+BASE_URL="https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-arm64.img"
 
 if [[ ! -f "$BASE_IMAGE" ]]; then
-    info "Downloading Ubuntu 24.04 arm64 cloud image ..."
+    info "Downloading Ubuntu 26.04 arm64 cloud image ..."
     curl -L --progress-bar -o "$BASE_IMAGE" "$BASE_URL"
 else
     info "Base image already present: $BASE_IMAGE"

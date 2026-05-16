@@ -1,6 +1,6 @@
 # raspi-otbr
 
-Flash a Raspberry Pi 4B with Ubuntu Server 24.04 LTS pre-configured as an OpenThread Border Router (OTBR), using an ESP32-C6 as the Radio Co-Processor (RCP). Combined with a UPS Hat, batteries, and a small USB keypad, this makes a purpose-built Thread OTBR with Bluetooth+Thread commissioning capability via the chiptool snap.
+Flash a Raspberry Pi 4B with Ubuntu Server 26.04 LTS pre-configured as an OpenThread Border Router (OTBR), using an ESP32-C6 as the Radio Co-Processor (RCP). Combined with a UPS Hat, batteries, and a small USB keypad, this makes a purpose-built Thread OTBR with Bluetooth+Thread commissioning capability via the chiptool snap.
 
 ## Key commands
 
@@ -80,12 +80,12 @@ Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variab
 
 | Script | Target OS | Runtime | RCP detection |
 |--------|-----------|---------|---------------|
-| `flash-piotbr.sh` | Ubuntu Server 24.04 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
+| `flash-piotbr.sh` | Ubuntu Server 26.04 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
 | `otbr-snap-setup.sh` | Ubuntu Server/Desktop (bare metal) | snap (live) | ESP32-C6 or Sonoff |
 | `otbr-docker-setup.sh` | Ubuntu Server/Desktop (bare metal) | Docker CE + nginx | any USB dongle via udev symlink |
 | `provision_piotbrvm.sh` / `provision_incus.sh` | QEMU/Incus VM (test) | snap | simulated or USB passthrough |
 
-- `flash-piotbr.sh` — downloads Ubuntu Server 24.04.4 arm64+raspi image, verifies SHA-256, flashes to SD, injects cloud-init NoCloud payload into the `system-boot` partition
+- `flash-piotbr.sh` — downloads Ubuntu Server 26.04.4 arm64+raspi image, verifies SHA-256, flashes to SD, injects cloud-init NoCloud payload into the `system-boot` partition
 - `otbr-snap-setup.sh` — detects USB RCP, verifies Spinel firmware, installs and configures the OTBR snap; runs as normal user (`sudo` invoked internally)
 - `otbr-docker-setup.sh` — installs Docker CE, pulls `openthread/otbr`, writes udev rule for stable dongle symlink, sets up nginx reverse proxy, joins Thread network; requires root
 - `provision_piotbrvm.sh` — QEMU aarch64 end-to-end test; falls back to simulated RCP when no hardware present
@@ -107,7 +107,7 @@ Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variab
 
 ```
 cache/
-  ubuntu/server/    ← Ubuntu Server 24.04 arm64+raspi .img.xz and .img (flash-piotbr.sh + test-vm/setup.sh)
+  ubuntu/server/    ← Ubuntu Server 26.04 arm64+raspi .img.xz and .img (flash-piotbr.sh + test-vm/setup.sh)
   snap/             ← openthread-border-router .snap + .assert (all provisioners)
   esp32/rcp/        ← ESP32-C6 RCP firmware binary (user-placed or URL-downloaded)
   ot-rcp-sim/       ← ot-rcp simulation binary (test-vm/run-vm.sh, provision_incus.sh)
@@ -141,7 +141,7 @@ sudo ./provision_incus.sh --reprovision          # delete and reprovision
 ```
 
 **Key differences from QEMU:**
-- Ubuntu Server 24.04 (not Ubuntu Core) — Incus has no SSO-free Ubuntu Core x86_64 path
+- Ubuntu Server 26.04 (not Ubuntu Core) — Incus has no SSO-free Ubuntu Core x86_64 path
 - sim-rcp binary runs *inside* the instance (native x86_64); no host-side PTY bridge
 - Disk shares: virtiofs in VM mode, bind-mount in container mode (firstboot handles both)
 - Real USB passthrough: VM uses `incus usb` (by VID:PID); container uses `unix-char` device
@@ -187,7 +187,7 @@ The baud rate `460800` in the Spinel URL is conventional — USB CDC-ACM (`/dev/
 
 - cloud-init on Ubuntu Server uses the **NoCloud** datasource, which reads `user-data` and `meta-data` from the **root** of the `system-boot` FAT32 partition (not a subdirectory).
 - Ubuntu Core 24 intentionally disables cloud-init at first boot — it is not a viable provisioning target for this approach. Use Ubuntu Server instead.
-- Target arch is `arm64` (aarch64). The image is `ubuntu-24.04.4-preinstalled-server-arm64+raspi.img.xz`.
+- Target arch is `arm64` (aarch64). The image is `ubuntu-26.04.4-preinstalled-server-arm64+raspi.img.xz`.
 - RCP is an ESP32-C6 connected via USB, communicating over Spinel/HDLC at 460800 baud.
 - QEMU 10 dropped `tty` as a chardev backend. Use `serial` for connecting to existing PTY/tty paths (e.g. `-chardev serial,id=...,path=...`).
 

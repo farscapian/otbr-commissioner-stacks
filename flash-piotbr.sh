@@ -3,7 +3,7 @@
 # flash-piotbr.sh
 #
 # PURPOSE
-#   Download Ubuntu Server 24.04 LTS (arm64, Raspberry Pi), verify integrity,
+#   Download Ubuntu Server 26.04 LTS (arm64, Raspberry Pi), verify integrity,
 #   flash it to a target SD card, then inject a cloud-init payload onto the
 #   system-boot FAT partition so that on first boot the device:
 #
@@ -34,12 +34,12 @@ set -exuo pipefail
 # 1. Configuration
 # ---------------------------------------------------------------------------
 
-# 1.1 Image — Ubuntu Server 24.04 LTS, arm64, Raspberry Pi
-SERVER_VERSION="24.04.4"
+# 1.1 Image — Ubuntu Server 26.04 LTS, arm64, Raspberry Pi
+SERVER_VERSION="26.04"
 IMAGE_FILENAME="ubuntu-${SERVER_VERSION}-preinstalled-server-arm64+raspi.img.xz"
-IMAGE_URL="https://cdimage.ubuntu.com/releases/24.04/release/${IMAGE_FILENAME}"
+IMAGE_URL="https://cdimage.ubuntu.com/releases/26.04/release/${IMAGE_FILENAME}"
 # SHA-256 of the compressed .xz as published by Canonical
-IMAGE_SHA256="790652faeb4f61ce7bb12f5cb61734595c61d3cd882915b8b5f9918106c80d37"
+IMAGE_SHA256="10604098a0c4eeb7359e58e12b01badbce8c74b0d53b414e633ba0b047b512cd"
 
 # 1.2 All artefacts live under cache/ and artifacts/ next to this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -255,7 +255,7 @@ fi  # CLOUD_INIT_ONLY
 # ---------------------------------------------------------------------------
 # 7. Mount system-boot partition
 # ---------------------------------------------------------------------------
-# Ubuntu Server 24.04 arm64+raspi partition layout:
+# Ubuntu Server 26.04 arm64+raspi partition layout:
 #   p1  vfat    system-boot   (~256 MiB) ← cloud-init NoCloud seed goes here
 #   p2  ext4    writable      (root filesystem)
 

@@ -25,7 +25,7 @@ otbrstack() {
             esac
             ;;
         flash)
-            echo "[otbrstack] Flash Ubuntu Server 24.04 to SD card  (scripts: ${_OTBRSTACK_DIR})"
+            echo "[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: ${_OTBRSTACK_DIR})"
             "$_OTBRSTACK_DIR/flash-piotbr.sh" "${@:2}"
             ;;
         docker)
@@ -74,7 +74,7 @@ otbrstack() {
             echo ""
             echo "  vm x64        Incus VM test (native x86_64)"
             echo "  vm arm64      QEMU aarch64 test (Raspberry Pi 4 sim)"
-            echo "  flash         Flash Ubuntu Server 24.04 to SD card (needs /dev/sdX)"
+            echo "  flash         Flash Ubuntu Server 26.04 to SD card (needs /dev/sdX)"
             echo "  docker        Docker bare-metal provisioner"
             echo "  snap          Snap bare-metal provisioner"
             echo "  logs [-f] <host>  Tail cloud-init + firstboot + OTBR snap logs over SSH"
