@@ -10,7 +10,7 @@ otbrstack() {
     case "$cmd" in
         vm)
             case "${2:-}" in
-                x86|x86_64)
+                x64|x86_64)
                     echo "[otbrstack] Incus VM (native x86_64)  (scripts: ${_OTBRSTACK_DIR})"
                     "$_OTBRSTACK_DIR/provision_incus.sh" "${@:3}"
                     ;;
@@ -19,7 +19,7 @@ otbrstack() {
                     "$_OTBRSTACK_DIR/provision_piotbrvm.sh" "${@:3}"
                     ;;
                 *)
-                    echo "Usage: otbrstack vm <x86|arm64> [extra args]"
+                    echo "Usage: otbrstack vm <x64|arm64> [extra args]"
                     return 1
                     ;;
             esac
@@ -72,7 +72,7 @@ otbrstack() {
         *)
             echo "Usage: otbrstack <command> [args]"
             echo ""
-            echo "  vm x86        Incus VM test (native x86_64)"
+            echo "  vm x64        Incus VM test (native x86_64)"
             echo "  vm arm64      QEMU aarch64 test (Raspberry Pi 4 sim)"
             echo "  flash         Flash Ubuntu Server 24.04 to SD card (needs /dev/sdX)"
             echo "  docker        Docker bare-metal provisioner"

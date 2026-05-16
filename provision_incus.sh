@@ -56,7 +56,7 @@ for _arg in "$@"; do
     esac
 done
 
-[[ -z "$INSTANCE_NAME" ]] && INSTANCE_NAME="otbr-$([[ $INSTANCE_MODE == vm ]] && echo vm || echo ct)"
+[[ -z "$INSTANCE_NAME" ]] && INSTANCE_NAME="$([[ $INSTANCE_MODE == vm ]] && echo otbrvm64 || echo otbr-ct)"
 
 if [[ -n "$_ENV_FILE" ]]; then
     [[ -f "$_ENV_FILE" ]] || { echo "env file not found: $_ENV_FILE" >&2; exit 1; }
@@ -425,7 +425,7 @@ step "Creating Incus $INSTANCE_MODE: $INSTANCE_NAME"
 TYPE_FLAG="$([[ $INSTANCE_MODE == vm ]] && echo "--vm" || echo "")"
 
 # shellcheck disable=SC2086
-incus init images:ubuntu/24.04 "$INSTANCE_NAME" $TYPE_FLAG \
+incus init ubuntu:24.04 "$INSTANCE_NAME" $TYPE_FLAG \
     --config "user.user-data=${USER_DATA}"
 
 # security.nesting lets snapd manage systemd services inside a container

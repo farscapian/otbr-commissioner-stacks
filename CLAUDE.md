@@ -30,7 +30,7 @@ sudo ./provision_incus.sh
 sudo ./provision_incus.sh --container
 
 # Tear down Incus instance
-incus delete otbr-vm --force   # or otbr-ct
+incus delete otbrvm64 --force   # or otbr-ct
 
 # Docker on bare metal (Ubuntu Server/Desktop; installs Docker CE + nginx)
 sudo ./otbr-docker-setup.sh
@@ -134,7 +134,7 @@ Re-run `setup.sh` to refresh the cached snap revision.
 `provision_incus.sh` provisions an Incus VM or system container with the same OTBR first-boot sequence, but on native x86_64 — no emulation overhead.
 
 ```bash
-sudo ./provision_incus.sh                        # VM (default), name=otbr-vm
+sudo ./provision_incus.sh                        # VM (default), name=otbrvm64
 sudo ./provision_incus.sh --container            # system container, name=otbr-ct
 sudo ./provision_incus.sh --vm --name=otbr-test  # custom name
 sudo ./provision_incus.sh --reprovision          # delete and reprovision
