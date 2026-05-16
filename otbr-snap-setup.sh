@@ -3,19 +3,28 @@
 # Detects ESP32 RCP device, verifies spinel firmware, configures and restarts OTBR snap.
 # Run as normal user — sudo is invoked only when needed for snap commands.
 
-set -euo pipefail
+set -euox pipefail
 
 # ---------------------------------------------------------------------------
 # 1. Configuration
 # ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BAUD=460800
 INFRA_IF="${INFRA_IF:-$(ip route show default | awk '/default/ {print $5; exit}')}"
 THREAD_IF="${THREAD_IF:-wpan0}"
-PYSPINEL_VENV="${PYSPINEL_VENV:-$(dirname "$0")/artifacts/pyspinel-venv}"
+PYSPINEL_VENV="${PYSPINEL_VENV:-${SCRIPT_DIR}/artifacts/pyspinel-venv}"
 ESPRESSIF_VENDOR_ID="303a"
 SONOFF_VENDOR_ID="10c4"
 SONOFF_PRODUCT_ID="ea60"
-ENV_FILE="${ENV_FILE:-$(dirname "$0")/.env}"
+if [[ -z "${ENV_FILE:-}" ]]; then
+    ENV_FILE="${SCRIPT_DIR}/$(hostname).env"
+    if [[ ! -f "$ENV_FILE" ]]; then
+        [[ -f "${SCRIPT_DIR}/.env" ]] \
+            || { echo "[ERROR] No $(hostname).env or .env found in ${SCRIPT_DIR}. Set ENV_FILE= to override." >&2; exit 1; }
+        cp "${SCRIPT_DIR}/.env" "$ENV_FILE"
+        echo "[INFO]  Created ${ENV_FILE} from .env."
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Helpers
@@ -50,6 +59,28 @@ load_env() {
 
     [[ -n "${THREAD_DATASET_TLV:-}" ]] || die "THREAD_DATASET_TLV not set in $ENV_FILE"
     log "THREAD_DATASET_TLV loaded (${#THREAD_DATASET_TLV} hex chars)."
+}
+
+# ---------------------------------------------------------------------------
+# 4a. Suppress ModemManager for ESP32-C6 (vendor 303a)
+# ModemManager probes unknown USB-serial devices and can claim /dev/ttyACM0
+# before the OTBR snap or our Spinel probe opens it.
+# ---------------------------------------------------------------------------
+suppress_modemmanager() {
+    local rule=/etc/udev/rules.d/99-esp32-no-modemmanager.rules
+    if [[ ! -f "$rule" ]]; then
+        log "Writing udev rule to prevent ModemManager from claiming ESP32-C6..."
+        sudo tee "$rule" > /dev/null << 'EOF'
+SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+EOF
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --subsystem-match=usb
+    fi
+    if systemctl is-active --quiet ModemManager 2>/dev/null; then
+        log "Stopping ModemManager so it releases /dev/ttyACM0..."
+        sudo systemctl stop ModemManager || true
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -190,20 +221,82 @@ ensure_kernel_modules() {
 # ---------------------------------------------------------------------------
 # 7. Stop OTBR snap if running (to free the serial port)
 # ---------------------------------------------------------------------------
-stop_otbr_if_running() {
+
+# OTBR_SNAP_STOPPED — set by maybe_stop_otbr:
+#   false  : snap was not running (or not installed)
+#   true   : snap was running and we stopped it
+#   skip   : snap was running and user declined to stop it
+OTBR_SNAP_STOPPED=false
+
+maybe_stop_otbr() {
     if ! snap list openthread-border-router &>/dev/null; then
-        log "OTBR snap not installed — skipping stop."
+        log "OTBR snap not installed."
         return 0
     fi
+
     local running
-    running=$(sudo snap services openthread-border-router | awk 'NR>1 && $3=="active" {print $1}' | head -1)
-    if [[ -n "$running" ]]; then
-        log "Stopping OTBR snap to free serial port..."
-        sudo snap stop openthread-border-router
-        sleep 1
-    else
-        log "OTBR snap is not running — no need to stop."
+    running=$(sudo snap services openthread-border-router \
+        | awk 'NR>1 && $3=="active" {print $1}' | head -1)
+
+    if [[ -z "$running" ]]; then
+        log "OTBR snap is installed but not running."
+        return 0
     fi
+
+    warn "openthread-border-router snap is active and currently holds the serial port."
+    local answer
+    read -rp "  Stop it now to run the spinel firmware check? [y/N] " answer
+    if [[ "${answer,,}" != "y" ]]; then
+        warn "Leaving snap running — spinel firmware check will be skipped."
+        OTBR_SNAP_STOPPED=skip
+        return 0
+    fi
+
+    log "Stopping OTBR snap..."
+    sudo snap stop openthread-border-router
+    sleep 2
+    OTBR_SNAP_STOPPED=true
+}
+
+# reload_rcp_device <tty_dev>
+# After the snap releases the port, the RCP's USB-serial state may be stale.
+# Toggle the USB device's sysfs 'authorized' flag to force a clean re-enumeration,
+# then wait for the device node to come back before returning.
+reload_rcp_device() {
+    local tty_dev="$1"
+    local devname
+    devname=$(basename "$tty_dev")
+
+    # Walk sysfs from the tty device up to the USB device node (has idVendor).
+    local check_path usb_dev=""
+    check_path=$(readlink -f /sys/class/tty/"$devname"/device 2>/dev/null || true)
+    while [[ -n "$check_path" && "$check_path" != "/" ]]; do
+        if [[ -f "$check_path/idVendor" ]]; then
+            usb_dev="$check_path"
+            break
+        fi
+        check_path=$(dirname "$check_path")
+    done
+
+    if [[ -z "$usb_dev" || ! -f "${usb_dev}/authorized" ]]; then
+        warn "Cannot locate USB device in sysfs for $tty_dev — waiting 3s for port to settle."
+        sleep 3
+        return 0
+    fi
+
+    log "Resetting USB device $(basename "$usb_dev") to flush stale serial state..."
+    echo 0 | sudo tee "${usb_dev}/authorized" > /dev/null
+    sleep 1
+    echo 1 | sudo tee "${usb_dev}/authorized" > /dev/null
+
+    log "Waiting for $tty_dev to re-enumerate (up to 10s)..."
+    local i=0
+    while [[ $i -lt 10 ]]; do
+        [[ -e "$tty_dev" ]] && { log "Device $tty_dev is back."; return 0; }
+        sleep 1
+        (( i++ ))
+    done
+    warn "$tty_dev did not reappear — it may have re-enumerated under a different node."
 }
 
 
@@ -217,11 +310,9 @@ verify_rcp() {
 
     log "Verifying RCP firmware on $port via spinel..."
 
-    if python3 - "$port" "$BAUD" 2>/dev/null << 'PYEOF'
-import sys, os, struct, termios, tty, time
-port, baud_str = sys.argv[1], sys.argv[2]
-BAUD_MAP = {'460800': termios.B460800, '115200': termios.B115200, '921600': termios.B921600}
-baud = BAUD_MAP.get(baud_str, termios.B460800)
+    if python3 - "$port" 2>/dev/null << 'PYEOF'
+import sys, os, struct, time, tty, select, fcntl
+port = sys.argv[1]
 HDLC_FLAG = 0x7E
 def fcs16(d):
     c = 0xFFFF
@@ -238,23 +329,78 @@ for b in raw:
 frame.append(HDLC_FLAG)
 try:
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    a = termios.tcgetattr(fd); tty.setraw(fd)
-    a[4] = a[5] = baud; termios.tcsetattr(fd, termios.TCSANOW, a)
-    os.set_blocking(fd, True)
+    fcntl.ioctl(fd, 0x5416, struct.pack('I', 0x0002))  # TIOCMBIS TIOCM_DTR
+    tty.setraw(fd)  # raw mode: bytes delivered immediately, not held for newline
     os.write(fd, bytes(frame)); time.sleep(1.0)
-    resp = os.read(fd, 256); os.close(fd)
+    ready, _, _ = select.select([fd], [], [], 3.0)
+    resp = os.read(fd, 256) if ready else b''
+    os.close(fd)
     sys.exit(0 if HDLC_FLAG in resp and len(resp) > 4 else 1)
 except: sys.exit(1)
 PYEOF
     then
         log "RCP firmware verified."
+        return 0
     else
-        die "No spinel response from $port. Is RCP firmware built with CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y and set-target esp32c6?"
+        warn "No spinel response from $port."
+        return 1
     fi
 }
 
 # ---------------------------------------------------------------------------
-# 8. Configure and restart OTBR snap
+# 8. Flash RCP firmware onto ESP32-C6 (optional — prompted on verify failure)
+# ---------------------------------------------------------------------------
+flash_rcp() {
+    local port="$1"
+    local firmware=""
+
+    if [[ -n "${RCP_FIRMWARE_PATH:-}" ]]; then
+        [[ -f "$RCP_FIRMWARE_PATH" ]] || die "RCP_FIRMWARE_PATH not found: $RCP_FIRMWARE_PATH"
+        firmware="$RCP_FIRMWARE_PATH"
+        log "Using local firmware: $firmware"
+    elif [[ -n "${RCP_FIRMWARE_URL:-}" ]]; then
+        local fw_cache="${SCRIPT_DIR}/cache/esp32/rcp/rcp-firmware-cache.bin"
+        mkdir -p "$(dirname "$fw_cache")"
+        if [[ ! -f "$fw_cache" ]]; then
+            log "Downloading RCP firmware from: $RCP_FIRMWARE_URL"
+            curl -L --progress-bar -o "$fw_cache" "$RCP_FIRMWARE_URL"
+        else
+            log "Using cached firmware: $fw_cache"
+        fi
+        firmware="$fw_cache"
+    else
+        warn "No firmware source configured — cannot flash."
+        warn "Set one of these in $ENV_FILE:"
+        warn "  RCP_FIRMWARE_PATH=/path/to/esp_ot_rcp.bin"
+        warn "  RCP_FIRMWARE_URL=https://example.com/esp_ot_rcp.bin"
+        return 1
+    fi
+
+    local esptool="" esptool_venv="${SCRIPT_DIR}/artifacts/esptool-venv"
+    for _cmd in esptool.py esptool; do
+        command -v "$_cmd" &>/dev/null && esptool="$_cmd" && break
+    done
+    unset _cmd
+    if [[ -z "$esptool" ]] && [[ -x "${esptool_venv}/bin/esptool.py" ]]; then
+        esptool="${esptool_venv}/bin/esptool.py"
+    fi
+    if [[ -z "$esptool" ]]; then
+        log "esptool not found — installing into venv ..."
+        python3 -m venv "${esptool_venv}"
+        "${esptool_venv}/bin/pip" install --quiet esptool
+        esptool="${esptool_venv}/bin/esptool.py"
+    fi
+
+    local flash_addr="${RCP_FLASH_ADDR:-0x10000}"
+    log "Flashing $firmware → $port at $flash_addr ..."
+    "$esptool" --chip esp32c6 --port "$port" --baud 460800 \
+        write_flash "$flash_addr" "$firmware"
+    log "Flash complete — waiting for USB re-enumeration ..."
+    sleep 8
+}
+
+# ---------------------------------------------------------------------------
+# 9. Configure and restart OTBR snap
 # ---------------------------------------------------------------------------
 configure_otbr() {
     local port="$1"
@@ -392,15 +538,6 @@ configure_ufw() {
 
     log "Configuring UFW rules for OTBR..."
 
-    # Ensure iptables-persistent is installed so ip6tables rules survive reboots
-    if ! dpkg -s iptables-persistent &>/dev/null; then
-        log "Installing iptables-persistent..."
-        # Pre-answer debconf prompts so apt doesn't pause for interactive input
-        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
-        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | sudo debconf-set-selections
-        sudo apt-get install -y iptables-persistent
-    fi
-
     # IPv6 forwarding: Thread (wpan0) <-> upstream interface
     # UFW persists route rules in its own config — no extra step needed.
     if ! sudo ufw status verbose | grep -q "Anywhere on wpan0"; then
@@ -411,27 +548,22 @@ configure_ufw() {
         log "UFW route rules for wpan0 already present."
     fi
 
-    # ICMPv6: required for NDP / router advertisements
-    local ip6tables_changed=0
-    if ! sudo ip6tables -C FORWARD -p icmpv6 -j ACCEPT 2>/dev/null; then
-        log "Allowing ICMPv6 forwarding..."
-        sudo ip6tables -A FORWARD -p icmpv6 -j ACCEPT
-        ip6tables_changed=1
+    # ICMPv6: required for NDP / router advertisements.
+    # Injected into /etc/ufw/before6.rules (UFW re-applies on reload/boot),
+    # avoiding any dependency on iptables-persistent.
+    local before6=/etc/ufw/before6.rules
+    local ufw_changed=0
+    if ! sudo grep -q "# OTBR ICMPv6" "$before6" 2>/dev/null; then
+        log "Injecting ICMPv6 rules into $before6..."
+        sudo sed -i '/^COMMIT$/i # OTBR ICMPv6\n-A ufw6-before-forward -p icmpv6 -j ACCEPT\n-A ufw6-before-input  -p icmpv6 -j ACCEPT' "$before6"
+        ufw_changed=1
     else
-        log "ICMPv6 FORWARD rule already present."
-    fi
-    if ! sudo ip6tables -C INPUT -p icmpv6 -j ACCEPT 2>/dev/null; then
-        log "Allowing ICMPv6 input..."
-        sudo ip6tables -A INPUT -p icmpv6 -j ACCEPT
-        ip6tables_changed=1
-    else
-        log "ICMPv6 INPUT rule already present."
+        log "ICMPv6 rules already present in $before6."
     fi
 
-    # Persist ip6tables rules so they survive reboots
-    if [[ "$ip6tables_changed" -eq 1 ]]; then
-        log "Saving ip6tables rules..."
-        sudo netfilter-persistent save
+    if [[ "$ufw_changed" -eq 1 ]]; then
+        log "Reloading UFW to apply ICMPv6 rules..."
+        sudo ufw reload
     fi
 
     # mDNS: needed for Thread SRP / service discovery
@@ -490,6 +622,7 @@ main() {
     load_env
     check_serial_group
     ensure_kernel_modules
+    suppress_modemmanager
 
     log "Searching for Thread radio device (ESP32-C6 preferred, Sonoff fallback)..."
     THREAD_DEVICE_TYPE=""
@@ -502,9 +635,37 @@ main() {
 
     log "Found $THREAD_DEVICE_TYPE device at: $THREAD_DEVICE_PORT"
 
-    stop_otbr_if_running
+    maybe_stop_otbr
+
     if [[ "$THREAD_DEVICE_TYPE" == "esp32c6" ]]; then
-        verify_rcp "$THREAD_DEVICE_PORT"
+        if [[ "$OTBR_SNAP_STOPPED" == "skip" ]]; then
+            log "Skipping spinel firmware check (snap still running)."
+        else
+            if [[ "$OTBR_SNAP_STOPPED" == "true" ]]; then
+                reload_rcp_device "$THREAD_DEVICE_PORT"
+                log "Re-detecting Thread device after USB reset..."
+                find_thread_device || true
+                [[ -n "$THREAD_DEVICE_PORT" ]] \
+                    || die "Thread device not found after USB reset."
+                log "Found $THREAD_DEVICE_TYPE at: $THREAD_DEVICE_PORT"
+            fi
+            if ! verify_rcp "$THREAD_DEVICE_PORT"; then
+                local ans
+                read -rp "  Flash RCP firmware onto $THREAD_DEVICE_PORT now? [y/N] " ans
+                if [[ "${ans,,}" == "y" ]]; then
+                    flash_rcp "$THREAD_DEVICE_PORT" || die "Flashing failed."
+                    log "Re-detecting Thread device after flash..."
+                    find_thread_device || true
+                    [[ -n "$THREAD_DEVICE_PORT" ]] \
+                        || die "Thread device not found after flashing."
+                    log "Found $THREAD_DEVICE_TYPE at: $THREAD_DEVICE_PORT"
+                    verify_rcp "$THREAD_DEVICE_PORT" \
+                        || die "Still no spinel response after flashing. Check firmware build config."
+                else
+                    die "No spinel response from $THREAD_DEVICE_PORT. Flash RCP firmware and re-run."
+                fi
+            fi
+        fi
     else
         log "Skipping spinel verification for $THREAD_DEVICE_TYPE device."
     fi

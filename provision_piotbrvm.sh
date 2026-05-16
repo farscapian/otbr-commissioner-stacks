@@ -13,7 +13,7 @@
 #   pyspinel installed automatically into pyspinel-venv/ on first run
 # =============================================================================
 
-set -euo pipefail
+set -euox pipefail
 
 # ---------------------------------------------------------------------------
 # 0. Bootstrap — root check + arg parsing + env file
@@ -181,15 +181,19 @@ flash_rcp() {
     fi
 
     # -- Ensure esptool is available -------------------------------------------
-    local esptool=""
+    local esptool="" esptool_venv="${SCRIPT_DIR}/artifacts/esptool-venv"
     for _cmd in esptool.py esptool; do
         command -v "$_cmd" &>/dev/null && esptool="$_cmd" && break
     done
     unset _cmd
+    if [[ -z "$esptool" ]] && [[ -x "${esptool_venv}/bin/esptool.py" ]]; then
+        esptool="${esptool_venv}/bin/esptool.py"
+    fi
     if [[ -z "$esptool" ]]; then
-        info "esptool not found — installing via pip ..."
-        pip3 install --quiet esptool
-        esptool="esptool.py"
+        info "esptool not found — installing into venv ..."
+        python3 -m venv "${esptool_venv}"
+        "${esptool_venv}/bin/pip" install --quiet esptool
+        esptool="${esptool_venv}/bin/esptool.py"
     fi
 
     # -- Flash -----------------------------------------------------------------
@@ -220,7 +224,7 @@ check_host_deps() {
         [ssh-keygen]=openssh-client
         [python3]=python3
         [socat]=socat
-        [lsof]=lsof
+        [fuser]=psmisc
     )
 
     local missing_pkgs=()
@@ -389,10 +393,8 @@ find_rcp() {
 _probe_rcp() {
     local port="$1" baud="$2"
     python3 - "$port" "$baud" 2>/dev/null << 'PYEOF'
-import sys, os, struct, termios, tty, time
-port, baud_str = sys.argv[1], sys.argv[2]
-BAUD_MAP = {'460800': termios.B460800, '115200': termios.B115200, '921600': termios.B921600}
-baud = BAUD_MAP.get(baud_str, termios.B460800)
+import sys, os, struct, time, tty, select, fcntl
+port = sys.argv[1]
 HDLC_FLAG = 0x7E
 def fcs16(d):
     c = 0xFFFF
@@ -409,11 +411,12 @@ for b in raw:
 frame.append(HDLC_FLAG)
 try:
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    a = termios.tcgetattr(fd); tty.setraw(fd)
-    a[4] = a[5] = baud; termios.tcsetattr(fd, termios.TCSANOW, a)
-    os.set_blocking(fd, True)
+    fcntl.ioctl(fd, 0x5416, struct.pack('I', 0x0002))  # TIOCMBIS TIOCM_DTR
+    tty.setraw(fd)  # raw mode: bytes delivered immediately, not held for newline
     os.write(fd, bytes(frame)); time.sleep(1.0)
-    resp = os.read(fd, 256); os.close(fd)
+    ready, _, _ = select.select([fd], [], [], 3.0)
+    resp = os.read(fd, 256) if ready else b''
+    os.close(fd)
     sys.exit(0 if HDLC_FLAG in resp and len(resp) > 4 else 1)
 except: sys.exit(1)
 PYEOF
@@ -447,7 +450,8 @@ find_rcp
 
 if [[ -n "$RCP_DEVICE" ]]; then
     # Check if the device is already held by another process (e.g. host OTBR snap)
-    _holder=$(lsof -t "$RCP_DEVICE" 2>/dev/null | head -1 || true)
+    # fuser avoids lsof's tendency to hang on wedged USB devices
+    _holder=$(fuser "$RCP_DEVICE" 2>/dev/null | grep -Eo '[0-9]+' | head -1 || true)
     if [[ -n "$_holder" ]]; then
         _holder_name=$(ps -p "$_holder" -o comm= 2>/dev/null || echo "PID $_holder")
         warn "$RCP_DEVICE is held open by: ${_holder_name} (PID ${_holder})"

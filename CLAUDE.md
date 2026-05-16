@@ -1,21 +1,21 @@
-# raspi-ubuntucore-otbr
+# raspi-otbr
 
-Flash a Raspberry Pi 4B with Ubuntu Core 24 pre-configured as an OpenThread Border Router (OTBR), using an ESP32-C6 as the Radio Co-Processor (RCP). Combined with a UPS Hat, batteries, and a small USB keypad, this makes a purpose-built Thread OTBR with Bluetooth+Thread commissioning capability via the chiptool snap.
+Flash a Raspberry Pi 4B with Ubuntu Server 24.04 LTS pre-configured as an OpenThread Border Router (OTBR), using an ESP32-C6 as the Radio Co-Processor (RCP). Combined with a UPS Hat, batteries, and a small USB keypad, this makes a purpose-built Thread OTBR with Bluetooth+Thread commissioning capability via the chiptool snap.
 
 ## Key commands
 
 ```bash
-# Full flash (or cloud-init-only if UC24 already present)
-sudo ./flash-otbr-core.sh /dev/sdX
+# Full flash (or cloud-init-only if Ubuntu Server already present)
+sudo ./flash-piotbr.sh /dev/sdX
 
 # Force full reflash
-sudo ./flash-otbr-core.sh -f /dev/sdX
+sudo ./flash-piotbr.sh -f /dev/sdX
 
 # Skip confirmation prompt
-sudo ./flash-otbr-core.sh -y /dev/sdX
+sudo ./flash-piotbr.sh -y /dev/sdX
 
 # Use a specific env file
-sudo ./flash-otbr-core.sh --env-file=pangolin.env /dev/sdX
+sudo ./flash-piotbr.sh --env-file=pangolin.env /dev/sdX
 
 # End-to-end QEMU test (emulated aarch64)
 sudo ./provision_piotbrvm.sh
@@ -58,12 +58,13 @@ Scripts source the env file directly — no `export` or `sudo -E` needed.
 | `BOOT_TIMEOUT` | piotbrvm | Seconds to wait for VM SSH (default: 1100) |
 | `OTBR_TIMEOUT` | piotbrvm | Seconds to wait for OTBR first-boot (default: 600) |
 | `SSH_PUBKEY` | flash, piotbrvm | SSH public key to inject into VM/image |
+| `SSH_MGMT_CIDRS` | flash | Space-separated IPs/CIDRs allowed SSH inbound via UFW (empty = allow all) |
 | `SSH_KEY_FILE` | piotbrvm | Path to matching private key (required when SSH_PUBKEY is set) |
 | `RCP_FIRMWARE_PATH` | flash | Path to ESP32-C6 RCP app binary (e.g. `cache/esp32/rcp/esp_ot_rcp.bin`) |
 | `RCP_FLASH_ADDR` | flash | Flash offset for firmware binary (default: `0x10000` for app-only binary) |
 | `RCP_FIRMWARE_URL` | flash | Download URL for RCP firmware (cached as `cache/esp32/rcp/rcp-firmware-cache.bin`) |
-| `SIM_RCP_BIN` | piotbrvm | Path to pre-built `ot-rcp` simulation binary |
-| `SIM_RCP_URL` | piotbrvm | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
+| `SIM_RCP_BIN` | piotbrvm, incus | Path to pre-built `ot-rcp` Linux simulation binary |
+| `SIM_RCP_URL` | piotbrvm, incus | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
 | `DONGLE_VENDOR` | docker | USB vendor ID for Thread dongle (from `udevadm info`) |
 | `DONGLE_PRODUCT` | docker | USB product ID for Thread dongle |
 | `DONGLE_SERIAL` | docker | USB serial string for Thread dongle (unique; creates stable symlink) |
@@ -79,12 +80,12 @@ Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variab
 
 | Script | Target OS | Runtime | RCP detection |
 |--------|-----------|---------|---------------|
-| `flash-otbr-core.sh` | Ubuntu Core 24 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
+| `flash-piotbr.sh` | Ubuntu Server 24.04 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
 | `otbr-snap-setup.sh` | Ubuntu Server/Desktop (bare metal) | snap (live) | ESP32-C6 or Sonoff |
 | `otbr-docker-setup.sh` | Ubuntu Server/Desktop (bare metal) | Docker CE + nginx | any USB dongle via udev symlink |
 | `provision_piotbrvm.sh` / `provision_incus.sh` | QEMU/Incus VM (test) | snap | simulated or USB passthrough |
 
-- `flash-otbr-core.sh` — downloads UC24 image, verifies SHA-256, flashes to SD, injects cloud-init payload
+- `flash-piotbr.sh` — downloads Ubuntu Server 24.04.4 arm64+raspi image, verifies SHA-256, flashes to SD, injects cloud-init NoCloud payload into the `system-boot` partition
 - `otbr-snap-setup.sh` — detects USB RCP, verifies Spinel firmware, installs and configures the OTBR snap; runs as normal user (`sudo` invoked internally)
 - `otbr-docker-setup.sh` — installs Docker CE, pulls `openthread/otbr`, writes udev rule for stable dongle symlink, sets up nginx reverse proxy, joins Thread network; requires root
 - `provision_piotbrvm.sh` — QEMU aarch64 end-to-end test; falls back to simulated RCP when no hardware present
@@ -106,14 +107,13 @@ Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variab
 
 ```
 cache/
-  ubuntu/core/      ← UC24 .img.xz and .img (flash-otbr-core.sh)
-  ubuntu/server/    ← Noble server arm64 cloud image (test-vm/setup.sh)
+  ubuntu/server/    ← Ubuntu Server 24.04 arm64+raspi .img.xz and .img (flash-piotbr.sh + test-vm/setup.sh)
   snap/             ← openthread-border-router .snap + .assert (all provisioners)
   esp32/rcp/        ← ESP32-C6 RCP firmware binary (user-placed or URL-downloaded)
   ot-rcp-sim/       ← ot-rcp simulation binary (test-vm/run-vm.sh, provision_incus.sh)
 
 artifacts/
-  cloud-init-out/   ← cloud-init payloads saved from last flash-otbr-core.sh run
+  cloud-init-out/   ← cloud-init payloads saved from last flash-piotbr.sh run
   pyspinel-venv/    ← auto-created Python venv for RCP Spinel probing
 ```
 
@@ -121,7 +121,7 @@ artifacts/
 
 `provision_piotbrvm.sh` boots a QEMU aarch64 VM, runs the full first-boot sequence, and verifies `ot-ctl state` reports an active Thread node.
 
-When no physical RCP is connected, `provision_piotbrvm.sh` automatically passes `--sim-rcp` to `run-vm.sh`. The sim path requires `SIM_RCP_BIN` or `SIM_RCP_URL` in `.env` — see table above. Pre-built binaries: https://github.com/espressif/esp-thread-br/releases
+When no physical RCP is connected, `provision_piotbrvm.sh` automatically passes `--sim-rcp` to `run-vm.sh`. The sim path requires `SIM_RCP_BIN` or `SIM_RCP_URL` in `.env` — see table above. Build from source: `cd openthread && ./script/cmake-build simulation` (binary at `build/simulation/examples/apps/ncp/ot-rcp`).
 
 ### Snap caching (avoids store rate limits)
 
@@ -185,9 +185,9 @@ The baud rate `460800` in the Spinel URL is conventional — USB CDC-ACM (`/dev/
 
 ## Key constraints
 
-- cloud-init on **Ubuntu Core** supports only: `write_files`, `runcmd`, `snap`, `final_message`. No `packages`, `apt`, or `users` modules. (The QEMU VM uses Ubuntu Server, which has full cloud-init support.)
-- User accounts on Ubuntu Core are managed via Ubuntu SSO (`console-conf` on first boot) — not cloud-init.
-- Target arch is `arm64` (aarch64). The UC24 image is `ubuntu-core-24-arm64+raspi.img.xz`.
+- cloud-init on Ubuntu Server uses the **NoCloud** datasource, which reads `user-data` and `meta-data` from the **root** of the `system-boot` FAT32 partition (not a subdirectory).
+- Ubuntu Core 24 intentionally disables cloud-init at first boot — it is not a viable provisioning target for this approach. Use Ubuntu Server instead.
+- Target arch is `arm64` (aarch64). The image is `ubuntu-24.04.4-preinstalled-server-arm64+raspi.img.xz`.
 - RCP is an ESP32-C6 connected via USB, communicating over Spinel/HDLC at 460800 baud.
 - QEMU 10 dropped `tty` as a chardev backend. Use `serial` for connecting to existing PTY/tty paths (e.g. `-chardev serial,id=...,path=...`).
 

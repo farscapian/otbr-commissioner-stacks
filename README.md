@@ -5,7 +5,7 @@ across four deployment targets — all driven by the same `.env` file:
 
 | Script | Target | Runtime |
 |--------|--------|---------|
-| `flash-otbr-core.sh` | Raspberry Pi 4B (Ubuntu Core 24) | snap via cloud-init |
+| `flash-piotbr.sh` | Raspberry Pi 4B (Ubuntu Core 24) | snap via cloud-init |
 | `otbr-snap-setup.sh` | Any Ubuntu bare-metal host | snap (live install) |
 | `otbr-docker-setup.sh` | Any Ubuntu bare-metal host | Docker CE + nginx |
 | `provision_piotbrvm.sh` / `provision_incus.sh` | QEMU / Incus VM | snap (for testing) |
@@ -68,10 +68,10 @@ The script sources the env file itself, so no `export` or `sudo -E` is needed.
 
 ```bash
 # uses .env in the script directory by default
-sudo ./flash-otbr-core.sh /dev/sdX
+sudo ./flash-piotbr.sh /dev/sdX
 
 # or point to any env file explicitly
-sudo ./flash-otbr-core.sh --env-file=/path/to/production.env /dev/sdX
+sudo ./flash-piotbr.sh --env-file=/path/to/production.env /dev/sdX
 ```
 
 If no `.env` is found and `--env-file` is not given, the script errors out.
@@ -160,7 +160,7 @@ The sequence on the device is:
 
 ## Smart flash detection
 
-By default, `flash-otbr-core.sh` checks whether Ubuntu Core is already on the target device (by looking for the `system-boot` partition label). If found, it skips the image download and `dd` flash entirely and only updates the cloud-init files — much faster when you only changed a config value.
+By default, `flash-piotbr.sh` checks whether Ubuntu Core is already on the target device (by looking for the `system-boot` partition label). If found, it skips the image download and `dd` flash entirely and only updates the cloud-init files — much faster when you only changed a config value.
 
 | Flag | Effect |
 |------|--------|
@@ -302,7 +302,7 @@ Optional:
 
 | File | Purpose |
 |------|---------|
-| `flash-otbr-core.sh` | Flash Ubuntu Core 24 to SD card (Raspberry Pi) |
+| `flash-piotbr.sh` | Flash Ubuntu Core 24 to SD card (Raspberry Pi) |
 | `otbr-snap-setup.sh` | Bare-metal snap provisioner (Ubuntu Server/Desktop) |
 | `otbr-docker-setup.sh` | Bare-metal Docker provisioner (Ubuntu Server/Desktop) |
 | `provision_piotbrvm.sh` | End-to-end QEMU aarch64 test |
