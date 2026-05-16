@@ -4,8 +4,8 @@
 # Differences from the QEMU (test-vm) variant:
 #   - Networking managed by Incus; no custom netplan or dual-NIC setup needed
 #   - sim-rcp runs INSIDE the instance (native x86_64), no host PTY bridge required
-#   - Disk shares arrive via virtiofs (VM) or Incus bind-mount (container);
-#     the firstboot script handles both transparently
+#   - Snap cache and sim binary injected via `incus file push` after boot;
+#     firstboot reads them from /root/snap-cache/ and /root/ot-rcp-sim/
 #   - No ifwatcher — single NIC, backbone is always the default route interface
 #   - No initramfs lz4 tweak — native x86_64 doesn't need it
 
@@ -44,14 +44,8 @@ write_files:
       RCP=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null | head -1 || true)
 
       if [[ -z "${RCP:-}" ]]; then
-        # No real hardware — try sim binary from virtiofs share (VM) or
-        # bind-mount (container). Both land at /mnt/ot-rcp-sim/ot-rcp.
-        SIM_DIR=/mnt/ot-rcp-sim
-        mkdir -p "$SIM_DIR"
-        # VM: needs explicit virtiofs mount; container: already bind-mounted, mount is a no-op
-        mount -t virtiofs ot_rcp_sim "$SIM_DIR" 2>/dev/null || true
-
-        SIM_BIN="${SIM_DIR}/ot-rcp"
+        # No real hardware — sim binary injected by provisioner via incus file push
+        SIM_BIN=/root/ot-rcp-sim/ot-rcp
         if [[ -x "$SIM_BIN" ]]; then
           echo "Starting simulated ot-rcp from $SIM_BIN ..."
           mkdir -p /run/ot-sim
@@ -74,14 +68,9 @@ write_files:
         snap version &>/dev/null && break || { echo "waiting for snapd ($i)..."; sleep 2; }
       done
 
-      # -- Install snap from virtiofs/bind-mount cache or store --------------
-      # VM: virtiofs mount needed first; container: already at /mnt/snap-cache
-      SNAP_MOUNT=/mnt/snap-cache
-      mkdir -p "$SNAP_MOUNT"
-      mount -t virtiofs snap_cache "$SNAP_MOUNT" 2>/dev/null || true
-
-      SNAP_FILE=$(ls  "$SNAP_MOUNT"/${SNAP}_*.snap   2>/dev/null | head -1 || true)
-      ASSERT_FILE=$(ls "$SNAP_MOUNT"/${SNAP}_*.assert 2>/dev/null | head -1 || true)
+      # -- Install snap from pushed cache (/root/snap-cache/) or store --------
+      SNAP_FILE=$(ls   /root/snap-cache/${SNAP}_*.snap   2>/dev/null | head -1 || true)
+      ASSERT_FILE=$(ls /root/snap-cache/${SNAP}_*.assert 2>/dev/null | head -1 || true)
 
       if [[ -n "$SNAP_FILE" && -n "$ASSERT_FILE" ]]; then
         echo "Installing $SNAP from cache: $(basename "$SNAP_FILE")"

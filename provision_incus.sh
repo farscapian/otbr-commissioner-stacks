@@ -21,11 +21,11 @@
 #   (or run as root).  Run test-vm/setup.sh first to populate cache/snap/ and
 #   cache/ot-rcp-sim/ — provision_incus.sh reuses those caches.
 #
-# DISK SHARING
-#   VM:        cache/snap and cache/ot-rcp-sim are virtiofs shares; firstboot
-#              mounts them with `mount -t virtiofs <tag> <mountpoint>`.
-#   Container: same directories are Incus bind-mounts; firstboot finds them
-#              already present at the expected paths.
+# FILE INJECTION
+#   After the instance starts, snap cache (.snap + .assert) and sim binary are
+#   pushed via `incus file push` into /root/snap-cache/ and /root/ot-rcp-sim/.
+#   Disk shares are not used: the Incus daemon runs as a non-root user and
+#   cannot stat paths under /home, so source-path validation always fails.
 # =============================================================================
 
 set -euox pipefail
@@ -433,31 +433,7 @@ incus init images:ubuntu/24.04 "$INSTANCE_NAME" $TYPE_FLAG \
     incus config set "$INSTANCE_NAME" security.nesting=true
 
 # ---------------------------------------------------------------------------
-# 9. Add disk shares (snap cache + sim binary)
-# ---------------------------------------------------------------------------
-
-step "Attaching disk shares"
-
-if [[ "$INSTANCE_MODE" == "vm" ]]; then
-    # VM: virtiofs — source is shared by host; mount tag = device name
-    incus config device add "$INSTANCE_NAME" snap_cache disk \
-        source="${SNAP_CACHE}" readonly=true
-    [[ -z "${RCP_DEVICE:-}" ]] && \
-        incus config device add "$INSTANCE_NAME" ot_rcp_sim disk \
-        source="${SIM_RCP_DIR}" readonly=true
-    info "virtiofs shares: snap_cache  ot_rcp_sim"
-else
-    # Container: bind-mount — path arg sets the mount point inside the container
-    incus config device add "$INSTANCE_NAME" snap_cache disk \
-        source="${SNAP_CACHE}" path=/mnt/snap-cache readonly=true
-    [[ -z "${RCP_DEVICE:-}" ]] && \
-        incus config device add "$INSTANCE_NAME" ot_rcp_sim disk \
-        source="${SIM_RCP_DIR}" path=/mnt/ot-rcp-sim readonly=true
-    info "bind-mounts: snap_cache  ot_rcp_sim"
-fi
-
-# ---------------------------------------------------------------------------
-# 10. Attach RCP device (real hardware only)
+# 9. Attach RCP device (real hardware only)
 # ---------------------------------------------------------------------------
 
 if [[ -n "${RCP_DEVICE:-}" ]]; then
@@ -478,7 +454,7 @@ if [[ -n "${RCP_DEVICE:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 11. Start instance
+# 10. Start instance
 # ---------------------------------------------------------------------------
 
 step "Starting instance"
@@ -486,17 +462,43 @@ incus start "$INSTANCE_NAME"
 info "Instance started."
 
 # ---------------------------------------------------------------------------
-# 12. Wait for cloud-init to complete
+# 11. Push snap cache + sim binary into running instance
 # ---------------------------------------------------------------------------
 
-step "Waiting for cloud-init (timeout ${BOOT_TIMEOUT}s)"
+step "Injecting snap cache and sim binary (timeout ${BOOT_TIMEOUT}s)"
 
-# Poll until exec is available (instance may still be booting)
+# The Incus daemon runs as a non-root user and cannot stat paths under /home.
+# incus file push transfers files through the Incus API, bypassing that limit.
+
 DEADLINE=$(( SECONDS + BOOT_TIMEOUT ))
 while (( SECONDS < DEADLINE )); do
     incus exec "$INSTANCE_NAME" -- true 2>/dev/null && break || sleep 2
 done
 (( SECONDS < DEADLINE )) || die "Timed out waiting for instance exec to become available."
+
+incus exec "$INSTANCE_NAME" -- mkdir -p /root/snap-cache /root/ot-rcp-sim
+
+_snap_pushed=0
+for _f in "${SNAP_CACHE}"/*.snap "${SNAP_CACHE}"/*.assert; do
+    [[ -f "$_f" ]] || continue
+    incus file push "$_f" "${INSTANCE_NAME}/root/snap-cache/$(basename "$_f")"
+    _snap_pushed=1
+done
+[[ "$_snap_pushed" -eq 1 ]] && info "Snap cache pushed to instance." \
+                             || warn "No snap files found — firstboot will install from store."
+unset _f _snap_pushed
+
+if [[ -z "${RCP_DEVICE:-}" && -f "${SIM_RCP_BIN_PATH}" ]]; then
+    incus file push --mode 0755 "${SIM_RCP_BIN_PATH}" \
+        "${INSTANCE_NAME}/root/ot-rcp-sim/ot-rcp"
+    info "Sim binary pushed to /root/ot-rcp-sim/ot-rcp"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. Wait for cloud-init to complete
+# ---------------------------------------------------------------------------
+
+step "Waiting for cloud-init (timeout ${BOOT_TIMEOUT}s)"
 
 if timeout "$BOOT_TIMEOUT" \
         incus exec "$INSTANCE_NAME" -- cloud-init status --wait --long; then
