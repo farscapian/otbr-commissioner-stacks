@@ -78,7 +78,7 @@ write_files:
         snap install "$SNAP_FILE"
       else
         echo "Snap cache empty or unavailable — installing from store"
-        snap install "$SNAP" --channel=latest/stable
+        snap install "$SNAP" --channel=latest/edge
       fi
 
       # -- Connect interfaces ------------------------------------------------
