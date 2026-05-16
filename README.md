@@ -5,10 +5,10 @@ across four deployment targets — all driven by the same `.env` file:
 
 | Script | Target | Runtime |
 |--------|--------|---------|
-| `flash-piotbr.sh` | Raspberry Pi 4B (Ubuntu Core 24) | snap via cloud-init |
+| `flash-piotbr.sh` | Raspberry Pi 4B (Ubuntu Server 26.04) | snap via cloud-init |
 | `otbr-snap-setup.sh` | Any Ubuntu bare-metal host | snap (live install) |
 | `otbr-docker-setup.sh` | Any Ubuntu bare-metal host | Docker CE + nginx |
-| `provision_piotbrvm.sh` / `provision_incus.sh` | QEMU / Incus VM | snap (for testing) |
+| `provision_incus.sh` | Incus VM or container (x86_64 or arm64) | snap (for testing) |
 
 ## Hardware
 
@@ -86,7 +86,7 @@ device will be destroyed.
    HDLC probe if `pyserial` is absent. Records the device path (or schedules
    auto-detection at boot if no RCP is plugged in yet).
 
-2. **Downloads Ubuntu Core 24** (`ubuntu-core-24-arm64+raspi.img.xz`) from
+2. **Downloads Ubuntu Server 26.04** (`ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz`) from
    Canonical, verifies its SHA-256, and extracts it. Both the compressed and
    extracted images are cached next to the script.
 
@@ -110,24 +110,9 @@ device will be destroyed.
 
 ## First boot
 
-### Ubuntu SSO registration (one-time, manual)
-
-Ubuntu Core requires device registration via Ubuntu SSO before SSH is available.
-On first power-on, `console-conf` shows a **"Press Enter to configure"** prompt on the
-HDMI display or serial console.
-
-**Important:** wait ~30 seconds after this prompt appears before pressing Enter. The
-system needs time to bring up the network and obtain a DHCP lease. Pressing Enter
-before the network is ready causes `console-conf` to loop back to the same screen
-without error. Once the network is up, pressing Enter opens the wizard to enter your
-Ubuntu SSO email address and seed your Launchpad SSH keys.
-
-After registration completes, SSH access becomes available and the OTBR first-boot
-script proceeds automatically in the background.
-
 ### OTBR first-boot
 
-First boot takes a few minutes after SSO registration. Progress is logged on the device at:
+First boot takes a few minutes. Progress is logged on the device at:
 
 ```
 /var/log/otbr-firstboot.log
@@ -148,63 +133,37 @@ The sequence on the device is:
 3. `otbr-ifwatcher.service` starts and monitors interface state changes for the
    lifetime of the device.
 
-## Ubuntu Core notes
-
-- Ubuntu Core 24 is the current stable Core release. UC26 Core images are not
-  yet published by Canonical; this script will be updated when they are.
-- cloud-init on Ubuntu Core supports a restricted module set: `write_files`,
-  `runcmd`, `snap`, `final_message`. The `packages`, `apt`, and `users` modules
-  are not available.
-- User accounts are managed via Ubuntu SSO (`console-conf` wizard on first boot),
-  not cloud-init. The `users` module is not supported on Ubuntu Core.
-
 ## Smart flash detection
 
-By default, `flash-piotbr.sh` checks whether Ubuntu Core is already on the target device (by looking for the `system-boot` partition label). If found, it skips the image download and `dd` flash entirely and only updates the cloud-init files — much faster when you only changed a config value.
+By default, `flash-piotbr.sh` checks whether Ubuntu Server is already on the target device (by looking for the `system-boot` partition label). If found, it skips the image download and `dd` flash entirely and only updates the cloud-init files — much faster when you only changed a config value.
 
 | Flag | Effect |
 |------|--------|
-| _(none)_ | Auto-detect: cloud-init-only if UC24 present, full flash otherwise |
-| `-f` | Force full reflash even if Ubuntu Core is already on the device |
+| _(none)_ | Auto-detect: cloud-init-only if system-boot present, full flash otherwise |
+| `-f` | Force full reflash even if Ubuntu Server is already on the device |
 | `-y` | Skip the `YES` confirmation prompt (full-flash mode only) |
 
-## Testing with QEMU (`provision_piotbrvm.sh`)
+## Testing with Incus (`provision_incus.sh`)
 
-`provision_piotbrvm.sh` runs an end-to-end test of the OTBR first-boot sequence inside a QEMU aarch64 VM — no physical hardware required.
+`provision_incus.sh` runs an end-to-end test of the OTBR first-boot sequence inside an Incus VM or system container — no physical hardware required.
 
-**Host requirements:**
-
-```
-qemu-system-aarch64  ssh  ssh-keygen  python3
-```
-
-pyspinel is installed automatically into `pyspinel-venv/` on first run (for RCP firmware verification if a USB serial device is present).
+**Host requirements:** Incus installed and current user in the `incus` group.
 
 **What it does:**
 
-1. If a USB serial device is connected, verifies it responds to Spinel (pyspinel).
-2. Generates a temporary SSH key pair for VM access.
-3. Wipes the previous VM disk and UEFI vars (fresh cloud-init run).
-4. Runs `test-vm/setup.sh` to prepare the VM image.
-5. Launches `test-vm/run-vm.sh` in the background.
-6. Waits for SSH to come up (default timeout: 300 s).
-7. Tails `/var/log/otbr-firstboot.log` until success or error (default timeout: 600 s).
-8. Queries `ot-ctl state` to confirm the Thread node is active.
+1. Renders the cloud-init user-data template with env vars.
+2. Creates and starts the Incus instance (VM or container).
+3. Pushes snap cache and sim binary via `incus file push`.
+4. Waits for `ot-ctl state` to confirm the Thread node is active.
 
 **Usage:**
 
 ```bash
-sudo ./provision_piotbrvm.sh
-sudo ./provision_piotbrvm.sh --env-file=/path/to/production.env
+sudo ./provision_incus.sh                       # x86_64 VM, name=otbrvm64
+sudo ./provision_incus.sh --container           # system container, name=otbr-ct
+sudo ./provision_incus.sh --arch=arm64          # arm64 VM (QEMU-emulated), name=otbrarm64
+sudo ./provision_incus.sh --reprovision         # delete and reprovision
 ```
-
-Optional env vars (can go in `.env`):
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `BOOT_TIMEOUT` | `300` | Seconds to wait for SSH |
-| `OTBR_TIMEOUT` | `600` | Seconds to wait for OTBR first-boot |
-| `SSH_PUBKEY` | _(auto-generated)_ | Inject your own public key into the VM |
 
 ## Bare-metal snap (`otbr-snap-setup.sh`)
 
@@ -289,7 +248,7 @@ Optional:
 | `DONGLE_SYMLINK` | `ttyTHREAD` | Symlink name created under `/dev/` |
 | `BAUD_RATE` | `460800` | Serial baud rate passed to the OTBR agent |
 
-## Partition layout (UC24 arm64+raspi)
+## Partition layout (Ubuntu Server 26.04 arm64+raspi)
 
 | Partition | Filesystem | Label | Purpose |
 |-----------|-----------|-------|---------|
@@ -302,11 +261,10 @@ Optional:
 
 | File | Purpose |
 |------|---------|
-| `flash-piotbr.sh` | Flash Ubuntu Core 24 to SD card (Raspberry Pi) |
+| `flash-piotbr.sh` | Flash Ubuntu Server 26.04 to SD card (Raspberry Pi) |
 | `otbr-snap-setup.sh` | Bare-metal snap provisioner (Ubuntu Server/Desktop) |
 | `otbr-docker-setup.sh` | Bare-metal Docker provisioner (Ubuntu Server/Desktop) |
-| `provision_piotbrvm.sh` | End-to-end QEMU aarch64 test |
-| `provision_incus.sh` | Incus VM/container test (faster, native x86_64) |
+| `provision_incus.sh` | Incus VM/container test (x86_64 or arm64) |
 | `pangolin.env` / `tvpc.env` | Example env files — copy to `.env` and edit |
 | `cache/` | Downloaded images, snaps, and firmware |
 | `artifacts/` | Generated cloud-init payloads and pyspinel venv |

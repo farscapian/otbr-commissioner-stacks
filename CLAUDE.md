@@ -17,12 +17,6 @@ sudo ./flash-piotbr.sh -y /dev/sdX
 # Use a specific env file
 sudo ./flash-piotbr.sh --env-file=pangolin.env /dev/sdX
 
-# End-to-end QEMU test (emulated aarch64)
-sudo ./provision_piotbrvm.sh
-
-# Tear down QEMU VM
-sudo ./teardown-vm.sh
-
 # Incus VM test (native x86_64, faster)
 sudo ./provision_incus.sh
 
@@ -55,16 +49,13 @@ Scripts source the env file directly — no `export` or `sudo -E` needed.
 | Variable | Scripts | Purpose |
 |----------|---------|---------|
 | `THREAD_DATASET_TLV` | all | Thread Active Operational Dataset (hex). Required. |
-| `BOOT_TIMEOUT` | piotbrvm | Seconds to wait for VM SSH (default: 1100) |
-| `OTBR_TIMEOUT` | piotbrvm | Seconds to wait for OTBR first-boot (default: 600) |
-| `SSH_PUBKEY` | flash, piotbrvm | SSH public key to inject into VM/image |
+| `SSH_PUBKEY` | flash, incus | SSH public key to inject into VM/image |
 | `SSH_MGMT_CIDRS` | flash | Space-separated IPs/CIDRs allowed SSH inbound via UFW (empty = allow all) |
-| `SSH_KEY_FILE` | piotbrvm | Path to matching private key (required when SSH_PUBKEY is set) |
 | `RCP_FIRMWARE_PATH` | flash | Path to ESP32-C6 RCP app binary (e.g. `cache/esp32/rcp/esp_ot_rcp.bin`) |
 | `RCP_FLASH_ADDR` | flash | Flash offset for firmware binary (default: `0x10000` for app-only binary) |
 | `RCP_FIRMWARE_URL` | flash | Download URL for RCP firmware (cached as `cache/esp32/rcp/rcp-firmware-cache.bin`) |
-| `SIM_RCP_BIN` | piotbrvm, incus | Path to pre-built `ot-rcp` Linux simulation binary |
-| `SIM_RCP_URL` | piotbrvm, incus | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
+| `SIM_RCP_BIN` | incus | Path to pre-built `ot-rcp` Linux simulation binary |
+| `SIM_RCP_URL` | incus | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
 | `DONGLE_VENDOR` | docker | USB vendor ID for Thread dongle (from `udevadm info`) |
 | `DONGLE_PRODUCT` | docker | USB product ID for Thread dongle |
 | `DONGLE_SERIAL` | docker | USB serial string for Thread dongle (unique; creates stable symlink) |
@@ -83,14 +74,12 @@ Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variab
 | `flash-piotbr.sh` | Ubuntu Server 26.04 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
 | `otbr-snap-setup.sh` | Ubuntu Server/Desktop (bare metal) | snap (live) | ESP32-C6 or Sonoff |
 | `otbr-docker-setup.sh` | Ubuntu Server/Desktop (bare metal) | Docker CE + nginx | any USB dongle via udev symlink |
-| `provision_piotbrvm.sh` / `provision_incus.sh` | QEMU/Incus VM (test) | snap | simulated or USB passthrough |
+| `provision_incus.sh` | Incus VM or container (test) | snap | simulated or USB passthrough |
 
-- `flash-piotbr.sh` — downloads Ubuntu Server 26.04.4 arm64+raspi image, verifies SHA-256, flashes to SD, injects cloud-init NoCloud payload into the `system-boot` partition
+- `flash-piotbr.sh` — downloads Ubuntu Server 26.04 arm64+raspi image, verifies SHA-256, flashes to SD, injects cloud-init NoCloud payload into the `system-boot` partition
 - `otbr-snap-setup.sh` — detects USB RCP, verifies Spinel firmware, installs and configures the OTBR snap; runs as normal user (`sudo` invoked internally)
 - `otbr-docker-setup.sh` — installs Docker CE, pulls `openthread/otbr`, writes udev rule for stable dongle symlink, sets up nginx reverse proxy, joins Thread network; requires root
-- `provision_piotbrvm.sh` — QEMU aarch64 end-to-end test; falls back to simulated RCP when no hardware present
-- `provision_incus.sh` — Incus VM or system container test (native x86_64, much faster)
-- `test-vm/` — VM setup and launch scripts used by `provision_piotbrvm.sh`
+- `provision_incus.sh` — Incus VM or system container test; native x86_64 or QEMU-emulated arm64
 - `incus/` — cloud-init template for Incus VM and container
 - `cache/` — all third-party downloaded content (see layout below)
 - `artifacts/` — generated shared artifacts (cloud-init output, pyspinel venv)
@@ -107,27 +96,17 @@ Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variab
 
 ```
 cache/
-  ubuntu/server/    ← Ubuntu Server 26.04 arm64+raspi .img.xz and .img (flash-piotbr.sh + test-vm/setup.sh)
+  ubuntu/server/    ← Ubuntu Server 26.04 arm64+raspi .img.xz and .img (flash-piotbr.sh)
   snap/             ← openthread-border-router .snap + .assert (all provisioners)
   esp32/rcp/        ← ESP32-C6 RCP firmware binary (user-placed or URL-downloaded)
-  ot-rcp-sim/       ← ot-rcp simulation binary (test-vm/run-vm.sh, provision_incus.sh)
+  ot-rcp-sim/       ← ot-rcp simulation binary (provision_incus.sh)
 
 artifacts/
-  cloud-init-out/   ← cloud-init payloads saved from last flash-piotbr.sh run
+  rpi/              ← cloud-init payloads from flash-piotbr.sh runs (timestamped)
+  x64vm/            ← cloud-init payloads from provision_incus.sh x86_64 runs
+  arm64vm/          ← cloud-init payloads from provision_incus.sh arm64 runs
   pyspinel-venv/    ← auto-created Python venv for RCP Spinel probing
 ```
-
-## Testing (QEMU)
-
-`provision_piotbrvm.sh` boots a QEMU aarch64 VM, runs the full first-boot sequence, and verifies `ot-ctl state` reports an active Thread node.
-
-When no physical RCP is connected, `provision_piotbrvm.sh` automatically passes `--sim-rcp` to `run-vm.sh`. The sim path requires `SIM_RCP_BIN` or `SIM_RCP_URL` in `.env` — see table above. Build from source: `cd openthread && ./script/cmake-build simulation` (binary at `build/simulation/examples/apps/ncp/ot-rcp`).
-
-### Snap caching (avoids store rate limits)
-
-`setup.sh` runs `snap download openthread-border-router` into `cache/snap/`. `run-vm.sh` mounts that directory into the VM via virtio-9p (`mount_tag=snap_cache`). `otbr-firstboot.sh` mounts it at `/mnt/snap-cache` and installs from the cached `.snap`+`.assert` files, falling back to the store if the mount fails.
-
-Re-run `setup.sh` to refresh the cached snap revision.
 
 ## Testing (Incus)
 
@@ -140,19 +119,12 @@ sudo ./provision_incus.sh --vm --name=otbr-test  # custom name
 sudo ./provision_incus.sh --reprovision          # delete and reprovision
 ```
 
-**Key differences from QEMU:**
-- Ubuntu Server 26.04 (not Ubuntu Core) — Incus has no SSO-free Ubuntu Core x86_64 path
-- sim-rcp binary runs *inside* the instance (native x86_64); no host-side PTY bridge
-- Disk shares: virtiofs in VM mode, bind-mount in container mode (firstboot handles both)
-- Real USB passthrough: VM uses `incus usb` (by VID:PID); container uses `unix-char` device
-- Uses `incus exec` for all remote ops — no SSH polling needed
-
 **Container-only constraints:**
 - `security.nesting=true` is set automatically (required for snapd)
 - `modprobe` in the container is a no-op; host kernel must have `cdc_acm`/`cp210x` loaded
 - If the OTBR snap's AppArmor profile blocks `/dev/pts/N` for the sim PTY, reconnect the interface manually: `incus exec <name> -- snap connect openthread-border-router:serial-port`
 
-**Prerequisite:** Run `test-vm/setup.sh` first to populate `cache/snap/`. The Incus provisioner reuses those caches.
+**Prerequisite:** Run `setup.sh` first to populate `cache/snap/`. The Incus provisioner reuses that cache.
 
 ## RCP firmware flashing
 
@@ -189,7 +161,6 @@ The baud rate `460800` in the Spinel URL is conventional — USB CDC-ACM (`/dev/
 - Ubuntu Core 24 intentionally disables cloud-init at first boot — it is not a viable provisioning target for this approach. Use Ubuntu Server instead.
 - Target arch is `arm64` (aarch64). The image is `ubuntu-26.04.4-preinstalled-server-arm64+raspi.img.xz`.
 - RCP is an ESP32-C6 connected via USB, communicating over Spinel/HDLC at 460800 baud.
-- QEMU 10 dropped `tty` as a chardev backend. Use `serial` for connecting to existing PTY/tty paths (e.g. `-chardev serial,id=...,path=...`).
 
 ## Code style
 
