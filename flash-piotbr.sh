@@ -24,7 +24,7 @@
 #   curl  sha256sum  xzcat  dd  mount  umount  partprobe  lsblk  python3
 # =============================================================================
 
-set -exuo pipefail
+set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # 0. Bootstrap — auto-source .env if present
@@ -132,16 +132,34 @@ require_cmd curl sha256sum xzcat dd lsblk partprobe python3 snap
 # reachable by name after flashing. The check runs as the real user (not root)
 # since sudo changes HOME to /root.
 _REAL_USER="${SUDO_USER:-$USER}"
-_SSH_CONFIG="$(eval echo "~${_REAL_USER}")/.ssh/config"
-if [[ -f "$_SSH_CONFIG" ]]; then
-    if ! grep -qiE "^[[:space:]]*Host[[:space:]]+.*\b${OTBR_HOSTNAME}\b" "$_SSH_CONFIG"; then
-        die "Hostname '${OTBR_HOSTNAME}' not found in ${_SSH_CONFIG}.\n       Add a Host entry before flashing so the device is reachable by name."
-    fi
+_REAL_HOME="$(eval echo "~${_REAL_USER}")"
+_SSH_DIR="${_REAL_HOME}/.ssh"
+_SSH_CONFIG="${_SSH_DIR}/config"
+
+_ssh_has_host=0
+if [[ -f "$_SSH_CONFIG" ]] && grep -qiE "^[[:space:]]*Host[[:space:]]+.*\b${OTBR_HOSTNAME}\b" "$_SSH_CONFIG"; then
+    _ssh_has_host=1
+fi
+
+if [[ "$_ssh_has_host" -eq 1 ]]; then
     info "SSH config entry found for '${OTBR_HOSTNAME}'."
 else
-    warn "No SSH config found at ${_SSH_CONFIG} — skipping hostname check."
+    warn "'${OTBR_HOSTNAME}' not found in ${_SSH_CONFIG}."
+    read -rp "  Add a Host entry for '${OTBR_HOSTNAME}' to ${_SSH_CONFIG}? [Y/n] " _yn
+    _yn="${_yn:-Y}"
+    if [[ "$_yn" =~ ^[Yy] ]]; then
+        mkdir -p "$_SSH_DIR"
+        chmod 700 "$_SSH_DIR"
+        chown "${_REAL_USER}:" "$_SSH_DIR"
+        printf '\nHost %s\n    User ubuntu\n' "${OTBR_HOSTNAME}" >> "$_SSH_CONFIG"
+        chmod 600 "$_SSH_CONFIG"
+        chown "${_REAL_USER}:" "$_SSH_CONFIG"
+        info "Added Host entry for '${OTBR_HOSTNAME}' to ${_SSH_CONFIG}."
+    else
+        die "Add a Host entry for '${OTBR_HOSTNAME}' to ${_SSH_CONFIG} and re-run."
+    fi
 fi
-unset _REAL_USER _SSH_CONFIG
+unset _REAL_USER _REAL_HOME _SSH_DIR _SSH_CONFIG _ssh_has_host _yn
 
 # Refuse to flash a device that has any partition currently mounted
 if lsblk -no MOUNTPOINT "$TARGET_DEV" 2>/dev/null | grep -q .; then
@@ -344,6 +362,13 @@ cat > "${CI_DIR}/user-data" <<USERDATA
 #cloud-config
 
 ${USERS_SECTION}
+
+# cloud-init installs these before runcmd, with built-in network readiness
+# and retry — more reliable than apt-get inside runcmd which runs before DHCP.
+package_update: true
+packages:
+  - avahi-daemon   # _meshcop._udp mDNS advertisement for Home Assistant discovery
+  - iw             # wireless regulatory domain (iw reg set US)
 
 # --------------------------------------------------------------------------
 # 9.1 File payloads
@@ -641,8 +666,25 @@ ${NETPLAN_WIFIS}
       # -- Wait for snapd to be fully seeded ---------------------------------
       snap wait system seed.loaded
 
-      # -- Install snap from store -------------------------------------------
-      snap install "\$SNAP" --channel=${OTBR_SNAP_CHANNEL}
+      # -- Ensure networkd has fully applied DNS config before probing --------
+      # networkctl wait-online blocks until at least one interface is routable
+      # (DHCP complete including DNS), resolving the race between networkd
+      # finishing DHCP and systemd-resolved having a working nameserver.
+      networkctl wait-online --any --timeout=120 2>/dev/null || true
+
+      # -- Wait for snap store DNS to resolve (systemd-resolved can be slow) --
+      for _i in \$(seq 1 30); do
+        getent hosts api.snapcraft.io >/dev/null 2>&1 && break
+        echo "Waiting for snap store DNS (\$_i/30)..."
+        sleep 5
+      done
+
+      # -- Install snap from store (retry on transient network errors) --------
+      for _i in \$(seq 1 5); do
+        snap install "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} && break
+        echo "Snap install attempt \$_i failed; retrying in 15s ..."
+        sleep 15
+      done
 
       # -- Connect interfaces ------------------------------------------------
       snap connect "\${SNAP}:firewall-control"
@@ -698,8 +740,6 @@ ${NETPLAN_WIFIS}
       ufw allow 80/tcp comment 'OTBR web UI'
       # mDNS — Avahi / Home Assistant discovery
       ufw allow 5353/udp comment 'mDNS'
-      # ICMPv6 — router advertisements and neighbor discovery on backbone
-      ufw allow proto ipv6-icmp comment 'ICMPv6'
       # Thread mesh interface — allow all traffic on wpan0
       ufw allow in on wpan0 comment 'Thread mesh (wpan0)'
       ufw --force enable
@@ -711,15 +751,9 @@ ${NETPLAN_WIFIS}
 # 9.3 runcmd — executes after write_files and snap modules
 # --------------------------------------------------------------------------
 runcmd:
-  # Refresh package index and upgrade all packages on first boot.
-  - apt-get update -y
-  - apt-get upgrade -y
-  # avahi-daemon: required for the OTBR snap to advertise _meshcop._udp
-  # iw: sets the wireless regulatory domain (not in Ubuntu Server minimal)
-  - apt-get install -y avahi-daemon iw
-
-  # Apply netplan (will take effect on next boot / networkd restart)
-  - netplan generate || true
+  # Apply netplan now so networkd has our config before firstboot starts.
+  # This also ensures systemd-resolved gets DNS servers from our DHCP config.
+  - netplan apply || true
 
   # Apply wireless regulatory domain immediately
   - iw reg set US || true
@@ -748,11 +782,13 @@ USERDATA
 
 info "cloud-init user-data written."
 
-CI_ARTIFACT_DIR="${SCRIPT_DIR}/artifacts/cloud-init-out"
+_TS="$(date +%Y%m%d-%H%M%S)"
+CI_ARTIFACT_DIR="${SCRIPT_DIR}/artifacts/rpi/${OTBR_HOSTNAME}/${_TS}"
 mkdir -p "$CI_ARTIFACT_DIR"
 cp "${CI_DIR}/meta-data" "${CI_ARTIFACT_DIR}/meta-data"
 cp "${CI_DIR}/user-data" "${CI_ARTIFACT_DIR}/user-data"
 info "cloud-init artifacts saved to ${CI_ARTIFACT_DIR}/"
+unset _TS
 
 # ---------------------------------------------------------------------------
 # 10. Unmount and finalise
