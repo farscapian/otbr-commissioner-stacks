@@ -28,7 +28,7 @@
 #              already present at the expected paths.
 # =============================================================================
 
-set -euo pipefail
+set -euox pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_VM_DIR="${SCRIPT_DIR}/test-vm"
@@ -150,15 +150,19 @@ flash_rcp() {
         return 1
     fi
 
-    local esptool=""
+    local esptool="" esptool_venv="${SCRIPT_DIR}/artifacts/esptool-venv"
     for _cmd in esptool.py esptool; do
         command -v "$_cmd" &>/dev/null && esptool="$_cmd" && break
     done
     unset _cmd
+    if [[ -z "$esptool" ]] && [[ -x "${esptool_venv}/bin/esptool.py" ]]; then
+        esptool="${esptool_venv}/bin/esptool.py"
+    fi
     if [[ -z "$esptool" ]]; then
-        info "esptool not found — installing via pip ..."
-        pip3 install --quiet esptool
-        esptool="esptool.py"
+        info "esptool not found — installing into venv ..."
+        python3 -m venv "${esptool_venv}"
+        "${esptool_venv}/bin/pip" install --quiet esptool
+        esptool="${esptool_venv}/bin/esptool.py"
     fi
 
     local flash_addr="$RCP_FLASH_ADDR"
@@ -284,6 +288,11 @@ fi
 info "Mode: $INSTANCE_MODE  Name: $INSTANCE_NAME"
 info "BOOT_TIMEOUT=${BOOT_TIMEOUT}s  OTBR_TIMEOUT=${OTBR_TIMEOUT}s"
 
+# Scope all incus commands to this project (INCUS_PROJECT is honoured by the CLI)
+INCUS_PROJECT="${INCUS_PROJECT:-dev}"
+export INCUS_PROJECT
+info "Incus project: $INCUS_PROJECT"
+
 # ---------------------------------------------------------------------------
 # 2. Host dependencies
 # ---------------------------------------------------------------------------
@@ -291,6 +300,16 @@ info "BOOT_TIMEOUT=${BOOT_TIMEOUT}s  OTBR_TIMEOUT=${OTBR_TIMEOUT}s"
 step "Checking host dependencies"
 
 command -v incus   &>/dev/null || die "incus not found. Install it: https://linuxcontainers.org/incus/docs/main/installing/"
+
+# Ensure the target project exists (unset INCUS_PROJECT so this is not self-referential)
+if ! INCUS_PROJECT="" incus project show "${INCUS_PROJECT}" &>/dev/null; then
+    info "Creating Incus project '${INCUS_PROJECT}' ..."
+    INCUS_PROJECT="" incus project create "${INCUS_PROJECT}" \
+        -c features.images=false \
+        -c features.profiles=false
+    info "Project '${INCUS_PROJECT}' created (shares images + profiles with default)."
+fi
+
 command -v curl    &>/dev/null || die "curl not found"
 command -v python3 &>/dev/null || die "python3 not found"
 command -v lsof    &>/dev/null || sudo apt-get install -y lsof >/dev/null
@@ -328,10 +347,12 @@ if [[ -z "${RCP_DEVICE:-}" ]]; then
 
     if [[ -n "${SIM_RCP_BIN:-}" ]]; then
         [[ -f "$SIM_RCP_BIN" ]] || die "SIM_RCP_BIN set but not found: $SIM_RCP_BIN"
+        chmod +x "$SIM_RCP_BIN"
         SIM_RCP_DIR="$(dirname "$SIM_RCP_BIN")"
         SIM_RCP_BIN_PATH="$SIM_RCP_BIN"
         info "Using SIM_RCP_BIN: $SIM_RCP_BIN_PATH"
     elif [[ -f "$SIM_RCP_BIN_PATH" ]]; then
+        chmod +x "$SIM_RCP_BIN_PATH"
         info "Cached sim binary: $SIM_RCP_BIN_PATH"
     elif [[ -n "${SIM_RCP_URL:-}" ]]; then
         info "Downloading sim binary from: $SIM_RCP_URL"
@@ -340,9 +361,10 @@ if [[ -z "${RCP_DEVICE:-}" ]]; then
         chmod +x "$SIM_RCP_BIN_PATH"
     else
         die "No sim binary available. Set one of these in your .env:
-  SIM_RCP_BIN=/path/to/ot-rcp
-  SIM_RCP_URL=https://...ot-rcp
-Pre-built binaries: https://github.com/espressif/esp-thread-br/releases"
+  SIM_RCP_BIN=/path/to/ot-rcp        (local Linux x86_64 binary)
+  SIM_RCP_URL=https://...ot-rcp       (download URL)
+Build from source: cd openthread && ./script/cmake-build simulation
+  Binary: build/simulation/examples/apps/ncp/ot-rcp"
     fi
 fi
 
@@ -360,7 +382,7 @@ if compgen -G "${SNAP_CACHE}/${SNAP_NAME}_*.snap" > /dev/null 2>&1; then
     info "Snap cache: $(ls ${SNAP_CACHE}/${SNAP_NAME}_*.snap | head -1 | xargs basename)"
 else
     info "Snap cache empty — downloading ${SNAP_NAME} ..."
-    snap download "$SNAP_NAME" --channel=latest/stable --target-directory="$SNAP_CACHE"
+    snap download "$SNAP_NAME" --channel=latest/edge --target-directory="$SNAP_CACHE"
     info "Snap cached."
 fi
 
@@ -403,7 +425,7 @@ step "Creating Incus $INSTANCE_MODE: $INSTANCE_NAME"
 TYPE_FLAG="$([[ $INSTANCE_MODE == vm ]] && echo "--vm" || echo "")"
 
 # shellcheck disable=SC2086
-incus init ubuntu:24.04 "$INSTANCE_NAME" $TYPE_FLAG \
+incus init images:ubuntu/24.04 "$INSTANCE_NAME" $TYPE_FLAG \
     --config "user.user-data=${USER_DATA}"
 
 # security.nesting lets snapd manage systemd services inside a container
@@ -416,21 +438,34 @@ incus init ubuntu:24.04 "$INSTANCE_NAME" $TYPE_FLAG \
 
 step "Attaching disk shares"
 
+# Incus AppArmor policy blocks /home paths as disk sources; stage to /var/tmp/
+# chmod 755 so the Incus daemon can stat the directory (mktemp defaults to 700)
+INCUS_STAGE_DIR=$(mktemp -d /var/tmp/otbr-incus-XXXXXX)
+chmod 755 "$INCUS_STAGE_DIR"
+trap 'rm -rf "$INCUS_STAGE_DIR"' EXIT
+
+cp -r "$SNAP_CACHE" "${INCUS_STAGE_DIR}/snap"
+SNAP_CACHE_STAGE="${INCUS_STAGE_DIR}/snap"
+
+SIM_RCP_STAGE="${INCUS_STAGE_DIR}/ot-rcp-sim"
+mkdir -p "$SIM_RCP_STAGE"
+[[ -f "${SIM_RCP_DIR}/ot-rcp" ]] && cp "${SIM_RCP_DIR}/ot-rcp" "$SIM_RCP_STAGE/"
+
 if [[ "$INSTANCE_MODE" == "vm" ]]; then
     # VM: virtiofs — no path arg; mount tag = device name
     incus config device add "$INSTANCE_NAME" snap_cache disk \
-        source="${SNAP_CACHE}" readonly=true
+        source="${SNAP_CACHE_STAGE}" readonly=true
     [[ -z "${RCP_DEVICE:-}" ]] && \
         incus config device add "$INSTANCE_NAME" ot_rcp_sim disk \
-        source="${SIM_RCP_DIR}" readonly=true
+        source="${SIM_RCP_STAGE}" readonly=true
     info "virtiofs shares: snap_cache${RCP_DEVICE:+} ot_rcp_sim"
 else
     # Container: bind-mount — path arg sets the mount point inside the container
     incus config device add "$INSTANCE_NAME" snap_cache disk \
-        source="${SNAP_CACHE}" path=/mnt/snap-cache readonly=true
+        source="${SNAP_CACHE_STAGE}" path=/mnt/snap-cache readonly=true
     [[ -z "${RCP_DEVICE:-}" ]] && \
         incus config device add "$INSTANCE_NAME" ot_rcp_sim disk \
-        source="${SIM_RCP_DIR}" path=/mnt/ot-rcp-sim readonly=true
+        source="${SIM_RCP_STAGE}" path=/mnt/ot-rcp-sim readonly=true
     info "bind-mounts: snap_cache${RCP_DEVICE:+} ot_rcp_sim"
 fi
 

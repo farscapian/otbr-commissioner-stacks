@@ -189,32 +189,20 @@ fi
 # PTY; QEMU exposes that PTY to the VM as a USB serial device (/dev/ttyUSB0).
 # No real RF — the simulated Thread node becomes network leader on its own.
 #
-# Configure the binary source in your .env:
-#   SIM_RCP_BIN   Path to an existing ot-rcp simulation binary.
-#   SIM_RCP_URL   Download URL for the binary (cached as cache/ot-rcp-sim/ot-rcp).
-#                 Pre-built binaries: https://github.com/espressif/esp-thread-br/releases
-
 SIM_RCP_ARGS=()
 
 ensure_sim_rcp_binary() {
-    local bin="${PROJECT_ROOT}/cache/ot-rcp-sim/ot-rcp"
+    local bin="${SIM_RCP_BIN:-${PROJECT_ROOT}/cache/ot-rcp-sim/ot-rcp}"
 
-    # 1. Explicit path from env
-    if [[ -n "${SIM_RCP_BIN:-}" ]]; then
-        [[ -f "$SIM_RCP_BIN" ]] || die "SIM_RCP_BIN set but not found: $SIM_RCP_BIN"
-        info "Using sim RCP binary: $SIM_RCP_BIN"
-        SIM_RCP_BIN_RESOLVED="$SIM_RCP_BIN"
-        return
-    fi
-
-    # 2. Cached download
+    # 1. Binary already present (default path or explicit SIM_RCP_BIN)
     if [[ -f "$bin" ]]; then
-        info "Cached ot-rcp simulation binary: $bin"
+        chmod +x "$bin"
+        info "Sim RCP binary: $bin"
         SIM_RCP_BIN_RESOLVED="$bin"
         return
     fi
 
-    # 3. Download from URL
+    # 2. Download from URL
     if [[ -n "${SIM_RCP_URL:-}" ]]; then
         info "Downloading ot-rcp simulation binary from: $SIM_RCP_URL"
         mkdir -p "$(dirname "$bin")"
@@ -226,9 +214,10 @@ ensure_sim_rcp_binary() {
     fi
 
     die "No ot-rcp simulation binary available. Set one of these in your .env:
-  SIM_RCP_BIN=/path/to/ot-rcp        (local binary)
+  SIM_RCP_BIN=/path/to/ot-rcp        (local Linux x86_64 binary)
   SIM_RCP_URL=https://...ot-rcp       (download URL)
-Pre-built binaries: https://github.com/espressif/esp-thread-br/releases"
+Build from source: cd openthread && ./script/cmake-build simulation
+  Binary: build/simulation/examples/apps/ncp/ot-rcp"
 }
 
 if [[ $SIM_RCP -eq 1 ]]; then

@@ -26,16 +26,25 @@ warn() { echo -e "${YLW}[WARN]${NC}  $*"; }
 die()  { echo -e "${RED}[ERR ]${NC}  $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 1. Install host dependencies
+# 1. Check host dependencies
 # ---------------------------------------------------------------------------
 
-info "Installing host dependencies ..."
-sudo apt-get install -y \
-    qemu-system-arm \
-    qemu-efi-aarch64 \
-    qemu-utils \
-    cloud-image-utils \
-    gettext-base   # for envsubst
+REQUIRED_CMDS=(qemu-system-aarch64 qemu-img cloud-localds envsubst)
+MISSING=()
+for cmd in "${REQUIRED_CMDS[@]}"; do
+    command -v "$cmd" &>/dev/null || MISSING+=("$cmd")
+done
+if [[ ! -f /usr/share/qemu-efi-aarch64/QEMU_EFI.fd ]]; then
+    MISSING+=(qemu-efi-aarch64)
+fi
+
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+    warn "Missing dependencies: ${MISSING[*]}"
+    warn "Run the top-level setup.sh first:"
+    warn "  ${PROJECT_ROOT}/setup.sh"
+    exit 1
+fi
+info "Host dependencies satisfied."
 
 # ---------------------------------------------------------------------------
 # 2. Download Ubuntu 24.04 Server arm64 cloud image
@@ -110,7 +119,7 @@ if compgen -G "${SNAP_CACHE}/${SNAP_NAME}_*.snap" > /dev/null 2>&1; then
     info "Snap cache already present: $(ls ${SNAP_CACHE}/${SNAP_NAME}_*.snap | head -1)"
 else
     info "Downloading ${SNAP_NAME} snap for offline install ..."
-    if snap download "$SNAP_NAME" --channel=latest/stable --target-directory="$SNAP_CACHE"; then
+    if snap download "$SNAP_NAME" --channel=latest/edge --target-directory="$SNAP_CACHE"; then
         info "Snap cached in ${SNAP_CACHE}/"
     else
         warn "snap download failed — VM will install ${SNAP_NAME} from the store on first boot."
@@ -119,30 +128,30 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Add / update 'piotbr' SSH Host entry (management NIC, localhost:2222)
+# 5. Add / update 'piotbrvm' SSH Host entry (management NIC, localhost:2222)
 # ---------------------------------------------------------------------------
 
 SSH_CONFIG="${HOME}/.ssh/config"
 mkdir -p "${HOME}/.ssh"
 chmod 700 "${HOME}/.ssh"
 
-SSH_BLOCK="Host piotbr
+SSH_BLOCK="Host piotbrvm
     HostName localhost
     Port 2222
     User ubuntu
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null"
 
-if grep -q "^Host piotbr" "$SSH_CONFIG" 2>/dev/null; then
-    info "SSH Host 'piotbr' already present in ${SSH_CONFIG} — skipping."
+if grep -q "^Host piotbrvm" "$SSH_CONFIG" 2>/dev/null; then
+    info "SSH Host 'piotbrvm' already present in ${SSH_CONFIG} — skipping."
 else
-    info "Adding SSH Host 'piotbr' to ${SSH_CONFIG} ..."
+    info "Adding SSH Host 'piotbrvm' to ${SSH_CONFIG} ..."
     {
         echo ""
         echo "$SSH_BLOCK"
     } >> "$SSH_CONFIG"
     chmod 600 "$SSH_CONFIG"
-    info "Done. You can now use: ssh piotbr"
+    info "Done. You can now use: ssh piotbrvm"
 fi
 
 info "============================================================"
@@ -152,8 +161,8 @@ info " To start the VM:"
 info "   cd test-vm && ./run-vm.sh"
 info ""
 info " SSH (once booted):"
-info "   ssh piotbr   (via management NIC, localhost:2222)"
+info "   ssh piotbrvm   (via management NIC, localhost:2222)"
 info ""
 info " Watch first-boot OTBR setup:"
-info "   ssh piotbr tail -f /var/log/otbr-firstboot.log"
+info "   ssh piotbrvm tail -f /var/log/otbr-firstboot.log"
 info "============================================================"
