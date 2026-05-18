@@ -763,13 +763,11 @@ USERDATA
 
 info "cloud-init user-data written."
 
-_TS="$(date +%Y%m%d-%H%M%S)"
-CI_ARTIFACT_DIR="${SCRIPT_DIR}/artifacts/rpi/${OTBR_HOSTNAME}/${_TS}"
+CI_ARTIFACT_DIR="${SCRIPT_DIR}/artifacts/rpi/${OTBR_HOSTNAME}"
 mkdir -p "$CI_ARTIFACT_DIR"
 cp "${CI_DIR}/meta-data" "${CI_ARTIFACT_DIR}/meta-data"
 cp "${CI_DIR}/user-data" "${CI_ARTIFACT_DIR}/user-data"
 info "cloud-init artifacts saved to ${CI_ARTIFACT_DIR}/"
-unset _TS
 
 # ---------------------------------------------------------------------------
 # 10. Unmount and finalise

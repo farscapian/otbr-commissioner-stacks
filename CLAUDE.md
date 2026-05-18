@@ -102,7 +102,7 @@ cache/
   ot-rcp-sim/       ← ot-rcp simulation binary (otbrstack vm)
 
 artifacts/
-  rpi/              ← cloud-init payloads from otbrstack flash runs (timestamped)
+  rpi/<hostname>/   ← cloud-init payloads from otbrstack flash (latest run, overwritten each time)
   x64vm/            ← cloud-init payloads from otbrstack vm x64 runs
   arm64vm/          ← cloud-init payloads from otbrstack vm arm64 runs
   pyspinel-venv/    ← auto-created Python venv for RCP Spinel probing
