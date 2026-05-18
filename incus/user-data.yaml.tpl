@@ -95,6 +95,9 @@ write_files:
       INFRA=${INFRA:-eth0}
       echo "Backbone interface: $INFRA"
 
+      # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
+      snap list chip-tool &>/dev/null || snap install chip-tool
+
       # -- Configure and start snap ------------------------------------------
       snap set "$SNAP" \
         infra-if="$INFRA" \
