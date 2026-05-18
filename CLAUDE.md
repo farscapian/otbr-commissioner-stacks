@@ -6,31 +6,31 @@ Flash a Raspberry Pi 4B with Ubuntu Server 26.04 LTS pre-configured as an OpenTh
 
 ```bash
 # Full flash (or cloud-init-only if Ubuntu Server already present)
-sudo ./flash-piotbr.sh /dev/sdX
+otbrstack flash /dev/sdX
 
 # Force full reflash
-sudo ./flash-piotbr.sh -f /dev/sdX
+otbrstack flash -f /dev/sdX
 
 # Skip confirmation prompt
-sudo ./flash-piotbr.sh -y /dev/sdX
+otbrstack flash -y /dev/sdX
 
 # Use a specific env file
-sudo ./flash-piotbr.sh --env-file=pangolin.env /dev/sdX
+otbrstack flash --env-file=pangolin.env /dev/sdX
 
 # Incus VM test (native x86_64, faster)
-sudo ./provision_incus.sh
+otbrstack vm x64
 
 # Incus system container test
-sudo ./provision_incus.sh --container
+otbrstack vm x64 --container
 
 # Tear down Incus instance
 incus delete otbrvm64 --force   # or otbr-ct
 
 # Docker on bare metal (Ubuntu Server/Desktop; installs Docker CE + nginx)
-sudo ./otbr-docker-setup.sh
+otbrstack docker
 
 # Snap on bare metal (Ubuntu Server/Desktop; installs/configures openthread-border-router snap)
-./otbr-snap-setup.sh
+otbrstack snap
 ```
 
 ## Environment setup
@@ -42,7 +42,7 @@ cp pangolin.env .env   # or tvpc.env — pick the closest example
 # Edit .env: set THREAD_DATASET_TLV, WIFI_SSID, WIFI_PASSWORD, etc.
 ```
 
-Scripts source the env file directly — no `export` or `sudo -E` needed.
+The env file is sourced automatically — no `export` or `sudo -E` needed.
 
 ### Relevant .env variables
 
@@ -69,54 +69,54 @@ Scripts source the env file directly — no `export` or `sudo -E` needed.
 
 Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variable:
 
-| Script | Target OS | Runtime | RCP detection |
-|--------|-----------|---------|---------------|
-| `flash-piotbr.sh` | Ubuntu Server 26.04 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
-| `otbr-snap-setup.sh` | Ubuntu Server/Desktop (bare metal) | snap (live) | ESP32-C6 or Sonoff |
-| `otbr-docker-setup.sh` | Ubuntu Server/Desktop (bare metal) | Docker CE + nginx | any USB dongle via udev symlink |
-| `provision_incus.sh` | Incus VM or container (test) | snap | simulated or USB passthrough |
+| Command | Target OS | Runtime | RCP detection |
+|---------|-----------|---------|---------------|
+| `otbrstack flash` | Ubuntu Server 26.04 (Raspberry Pi) | snap (cloud-init) | ESP32-C6 via USB |
+| `otbrstack snap` | Ubuntu Server/Desktop (bare metal) | snap (live) | ESP32-C6 or Sonoff |
+| `otbrstack docker` | Ubuntu Server/Desktop (bare metal) | Docker CE + nginx | any USB dongle via udev symlink |
+| `otbrstack vm x64` / `otbrstack vm arm64` | Incus VM or container (test) | snap | simulated or USB passthrough |
 
-- `flash-piotbr.sh` — downloads Ubuntu Server 26.04 arm64+raspi image, verifies SHA-256, flashes to SD, injects cloud-init NoCloud payload into the `system-boot` partition
-- `otbr-snap-setup.sh` — detects USB RCP, verifies Spinel firmware, installs and configures the OTBR snap; runs as normal user (`sudo` invoked internally)
-- `otbr-docker-setup.sh` — installs Docker CE, pulls `openthread/otbr`, writes udev rule for stable dongle symlink, sets up nginx reverse proxy, joins Thread network; requires root
-- `provision_incus.sh` — Incus VM or system container test; native x86_64 or QEMU-emulated arm64
+- `otbrstack flash` — downloads Ubuntu Server 26.04 arm64+raspi image, verifies SHA-256, flashes to SD, injects cloud-init NoCloud payload into the `system-boot` partition
+- `otbrstack snap` — detects USB RCP, verifies Spinel firmware, installs and configures the OTBR snap; runs as normal user (`sudo` invoked internally)
+- `otbrstack docker` — installs Docker CE, pulls `openthread/otbr`, writes udev rule for stable dongle symlink, sets up nginx reverse proxy, joins Thread network; requires root
+- `otbrstack vm x64` / `otbrstack vm arm64` — Incus VM or system container test; native x86_64 or arm64
 - `incus/` — cloud-init template for Incus VM and container
 - `cache/` — all third-party downloaded content (see layout below)
 - `artifacts/` — generated shared artifacts (cloud-init output, pyspinel venv)
 
 ### Docker architecture notes
 
-`otbr-docker-setup.sh` is designed for **any USB Thread dongle** (Sonoff, ESP32-C6, Silicon Labs, etc.). The dongle is identified by USB vendor/product/serial via udev, which creates a stable `/dev/ttyTHREAD` symlink. nginx exposes the OTBR REST API on `:8080` and the web UI on `:8088`, both proxied from the container's `127.0.0.1` ports.
+`otbrstack docker` is designed for **any USB Thread dongle** (Sonoff, ESP32-C6, Silicon Labs, etc.). The dongle is identified by USB vendor/product/serial via udev, which creates a stable `/dev/ttyTHREAD` symlink. nginx exposes the OTBR REST API on `:8080` and the web UI on `:8088`, both proxied from the container's `127.0.0.1` ports.
 
 ### Snap architecture notes
 
-`otbr-snap-setup.sh` prefers an **ESP32-C6** (Espressif vendor ID `303a`) and falls back to a Sonoff dongle (Silicon Labs `10c4:ea60`). It verifies RCP firmware via pyspinel before configuring the snap. The pyspinel venv is shared with other scripts at `artifacts/pyspinel-venv/`.
+`otbrstack snap` prefers an **ESP32-C6** (Espressif vendor ID `303a`) and falls back to a Sonoff dongle (Silicon Labs `10c4:ea60`). It verifies RCP firmware via pyspinel before configuring the snap. The pyspinel venv is shared with other scripts at `artifacts/pyspinel-venv/`.
 
 ### Cache layout
 
 ```
 cache/
-  ubuntu/server/    ← Ubuntu Server 26.04 arm64+raspi .img.xz and .img (flash-piotbr.sh)
+  ubuntu/server/    ← Ubuntu Server 26.04 arm64+raspi .img.xz and .img (otbrstack flash)
   snap/             ← openthread-border-router .snap + .assert (all provisioners)
   esp32/rcp/        ← ESP32-C6 RCP firmware binary (user-placed or URL-downloaded)
-  ot-rcp-sim/       ← ot-rcp simulation binary (provision_incus.sh)
+  ot-rcp-sim/       ← ot-rcp simulation binary (otbrstack vm)
 
 artifacts/
-  rpi/              ← cloud-init payloads from flash-piotbr.sh runs (timestamped)
-  x64vm/            ← cloud-init payloads from provision_incus.sh x86_64 runs
-  arm64vm/          ← cloud-init payloads from provision_incus.sh arm64 runs
+  rpi/              ← cloud-init payloads from otbrstack flash runs (timestamped)
+  x64vm/            ← cloud-init payloads from otbrstack vm x64 runs
+  arm64vm/          ← cloud-init payloads from otbrstack vm arm64 runs
   pyspinel-venv/    ← auto-created Python venv for RCP Spinel probing
 ```
 
 ## Testing (Incus)
 
-`provision_incus.sh` provisions an Incus VM or system container with the same OTBR first-boot sequence, but on native x86_64 — no emulation overhead.
+`otbrstack vm x64` provisions an Incus VM or system container with the same OTBR first-boot sequence, but on native x86_64 — no emulation overhead.
 
 ```bash
-sudo ./provision_incus.sh                        # VM (default), name=otbrvm64
-sudo ./provision_incus.sh --container            # system container, name=otbr-ct
-sudo ./provision_incus.sh --vm --name=otbr-test  # custom name
-sudo ./provision_incus.sh --reprovision          # delete and reprovision
+otbrstack vm x64                          # VM (default), name=otbrvm64
+otbrstack vm x64 --container             # system container, name=otbr-ct
+otbrstack vm x64 --vm --name=otbr-test   # custom name
+otbrstack vm x64 --reprovision           # delete and reprovision
 ```
 
 **Container-only constraints:**

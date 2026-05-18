@@ -3,25 +3,27 @@
 Provision an [OpenThread Border Router](https://openthread.io/guides/border-router) (OTBR)
 across four deployment targets — all driven by the same `.env` file:
 
-| Script | Target | Runtime |
-|--------|--------|---------|
-| `flash-piotbr.sh` | Raspberry Pi 4B (Ubuntu Server 26.04) | snap via cloud-init |
-| `otbr-snap-setup.sh` | Any Ubuntu bare-metal host | snap (live install) |
-| `otbr-docker-setup.sh` | Any Ubuntu bare-metal host | Docker CE + nginx |
-| `provision_incus.sh` | Incus VM or container (x86_64 or arm64) | snap (for testing) |
+| Command | Target | Runtime |
+|---------|--------|---------|
+| `otbrstack flash` | Raspberry Pi 4B (Ubuntu Server 26.04) | snap via cloud-init |
+| `otbrstack snap` | Any Ubuntu bare-metal host | snap (live install) |
+| `otbrstack docker` | Any Ubuntu bare-metal host | Docker CE + nginx |
+| `otbrstack vm x64` / `otbrstack vm arm64` | Incus VM or container | snap (for testing) |
+
+Source `otbrstack.sh` to get the `otbrstack` command (add to `~/.bashrc` for persistence):
+
+```bash
+source ./otbrstack.sh
+```
 
 ## Hardware
 
 | Component | Notes |
 |-----------|-------|
-| Raspberry Pi 4B | Primary target. Pi 3B works; Pi Zero 2 W has constraints (see below). |
+| Raspberry Pi 4B | Primary target. Pi 3B also works. |
 | ESP32-C6 (RCP firmware) | Connected via USB; communicates over Spinel/HDLC at 460800 baud. |
 | microSD card | 8 GB minimum. |
 | Network | eth0 (preferred) and/or wlan0 (optional fallback). |
-
-**Pi Zero 2 W caveats:** only one micro-USB OTG port (power must come from
-GPIO 5V pins; use an OTG adapter + hub for the ESP32-C6), and 512 MB RAM is
-tight during first boot.
 
 ## Host requirements
 
@@ -41,8 +43,7 @@ pip3 install pyserial
 ## Quick start
 
 **1. Flash RCP firmware onto the ESP32-C6** and connect it via USB before running
-the script. The script will detect the serial device and probe it for a valid
-Spinel response.
+`otbrstack`. It will detect the serial device and probe it for a valid Spinel response.
 
 **2. Generate or export your Thread Active Operational Dataset TLV:**
 
@@ -62,22 +63,22 @@ cp .env.example .env
 # edit .env with your values
 ```
 
-The script sources the env file itself, so no `export` or `sudo -E` is needed.
+The env file is sourced automatically, so no `export` or `sudo -E` is needed.
 
 **4. Identify your SD card device** (`lsblk`, `dmesg | tail`), then run:
 
 ```bash
 # uses .env in the script directory by default
-sudo ./flash-piotbr.sh /dev/sdX
+otbrstack flash /dev/sdX
 
 # or point to any env file explicitly
-sudo ./flash-piotbr.sh --env-file=/path/to/production.env /dev/sdX
+otbrstack flash --env-file=/path/to/production.env /dev/sdX
 ```
 
-If no `.env` is found and `--env-file` is not given, the script errors out.
+If no `.env` is found and `--env-file` is not given, the command errors out.
 
-The script will ask for confirmation before writing. All data on the target
-device will be destroyed.
+`otbrstack flash` will ask for confirmation before writing. All data on the
+target device will be destroyed.
 
 ## What the script does
 
