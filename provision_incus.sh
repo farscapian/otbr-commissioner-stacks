@@ -14,7 +14,7 @@
 #   --arch=arm64      Use arm64 image (QEMU-emulated; default: amd64)
 #   --arm64           Shorthand for --arch=arm64
 #   --name=NAME       Instance name (default: otbrvm64 / otbrarm64 / otbr-ct)
-#   --env-file=PATH   Path to env file (default: $(hostname).env)
+#   (env is loaded by otbrstack before invoking this script)
 #   --reprovision     Delete existing instance and provision from scratch
 #
 # PREREQUISITES
@@ -44,7 +44,6 @@ BAUD=460800
 INSTANCE_MODE="vm"
 INSTANCE_ARCH="amd64"
 INSTANCE_NAME=""
-_ENV_FILE=""
 REPROVISION=0
 
 for _arg in "$@"; do
@@ -54,7 +53,6 @@ for _arg in "$@"; do
         --arm64)        INSTANCE_ARCH="arm64" ;;
         --arch=*)       INSTANCE_ARCH="${_arg#--arch=}" ;;
         --name=*)       INSTANCE_NAME="${_arg#--name=}" ;;
-        --env-file=*)   _ENV_FILE="${_arg#--env-file=}" ;;
         --reprovision)  REPROVISION=1 ;;
         *) echo "Unknown arg: $_arg" >&2; exit 1 ;;
     esac
@@ -73,20 +71,9 @@ fi
 # All incus instance-level commands use the local: remote explicitly.
 INST="local:${INSTANCE_NAME}"
 
-if [[ -n "$_ENV_FILE" ]]; then
-    [[ -f "$_ENV_FILE" ]] || { echo "env file not found: $_ENV_FILE" >&2; exit 1; }
-else
-    _ENV_FILE="${SCRIPT_DIR}/$(hostname).env"
-    if [[ ! -f "$_ENV_FILE" ]]; then
-        [[ -f "${SCRIPT_DIR}/.env" ]] || { echo "No $(hostname).env or .env found; create one or use --env-file=PATH" >&2; exit 1; }
-        cp "${SCRIPT_DIR}/.env" "$_ENV_FILE"
-        warn "Created ${_ENV_FILE} from .env template."
-        warn "Edit it with your machine-specific details before re-running."
-        exit 1
-    fi
-fi
-set -a; source "$_ENV_FILE"; set +a
-unset _arg _ENV_FILE
+# Env is loaded by otbrstack before invoking this script.
+[[ -n "${THREAD_DATASET_TLV:-}" ]] || { echo "[ERROR] THREAD_DATASET_TLV not set — run via 'otbrstack vm'" >&2; exit 1; }
+unset _arg
 
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-300}"
 OTBR_TIMEOUT="${OTBR_TIMEOUT:-600}"

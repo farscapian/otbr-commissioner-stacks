@@ -132,7 +132,6 @@ if [[ "$SKIP_PROVISION" -eq 0 ]]; then
         "--${INSTANCE_MODE}" \
         "--arch=${INSTANCE_ARCH}" \
         "--name=${INSTANCE_NAME}" \
-        "--env-file=${ENV_FILE}" \
         "--reprovision" \
         || { echo -e "\n${RED}Provisioning failed — aborting tests.${NC}" >&2; exit 1; }
 else

@@ -17,30 +17,19 @@ warn()    { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 die()     { echo -e "\033[1;31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 # -----------------------------------------------------------------------------
-# 2. Configuration  (sourced from .env after helpers are defined)
+# 2. Configuration
+# Env is loaded by otbrstack before invoking this script.
 # -----------------------------------------------------------------------------
 
-load_config() {
-    local env_file
-    env_file="$(dirname "${BASH_SOURCE[0]}")/.env"
-
-    [[ -f "$env_file" ]] || die ".env file not found at ${env_file}. See .env.example for required variables."
-
-    # shellcheck source=/dev/null
-    set -o allexport
-    source "$env_file"
-    set +o allexport
-
+validate_config() {
     # Validate required variables
     for var in DONGLE_VENDOR DONGLE_PRODUCT DONGLE_SERIAL THREAD_DATASET_TLV; do
-        [[ -n "${!var:-}" ]] || die "Required variable '${var}' is not set in .env"
+        [[ -n "${!var:-}" ]] || die "Required variable '${var}' not set — run via 'otbrstack docker'"
     done
 
     # Optional overrides with defaults
     DONGLE_SYMLINK="${DONGLE_SYMLINK:-ttyTHREAD}"
     BAUD_RATE="${BAUD_RATE:-460800}"
-
-    success "Config loaded from ${env_file}."
 }
 
 # Fixed configuration (not in .env)
@@ -332,7 +321,21 @@ join_thread_network() {
 }
 
 # -----------------------------------------------------------------------------
-# 14. Summary
+# 14. chip-tool snap (Matter commissioning — BLE+Thread and Thread-only)
+# -----------------------------------------------------------------------------
+
+install_chiptool() {
+    if snap list chip-tool &>/dev/null; then
+        success "chip-tool snap already installed."
+        return 0
+    fi
+    info "Installing chip-tool snap..."
+    snap install chip-tool
+    success "chip-tool installed."
+}
+
+# -----------------------------------------------------------------------------
+# 15. Summary
 # -----------------------------------------------------------------------------
 
 print_summary() {
@@ -359,7 +362,7 @@ print_summary() {
 # -----------------------------------------------------------------------------
 
 main() {
-    load_config
+    validate_config
     disable_sleep
     detect_interface
     load_kernel_modules
@@ -370,6 +373,7 @@ main() {
     launch_container
     setup_nginx
     setup_firewall
+    install_chiptool
     join_thread_network
     print_summary
 }

@@ -27,10 +27,6 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# 0. Bootstrap — auto-source .env if present
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # 1. Configuration
 # ---------------------------------------------------------------------------
 
@@ -48,15 +44,13 @@ IMAGE_XZ="${SCRIPT_DIR}/cache/ubuntu/server/${IMAGE_FILENAME}"
 IMAGE_IMG="${SCRIPT_DIR}/cache/ubuntu/server/${IMAGE_FILENAME%.xz}"
 BAUD=460800
 
-# 1.2.5 Parse flags and source configuration (default env: $(hostname).env)
-_ENV_FILE=""
+# 1.2.5 Parse flags (env is loaded by otbrstack before invoking this script)
 _HOSTNAME_FLAG=""
 _FORCE_FLASH=0
 _SKIP_CONFIRM=0
 _POSARGS=()
 for _arg in "$@"; do
     case "$_arg" in
-        --env-file=*)  _ENV_FILE="${_arg#--env-file=}" ;;
         --hostname=*)  _HOSTNAME_FLAG="${_arg#--hostname=}" ;;
         -f)            _FORCE_FLASH=1 ;;
         -y)            _SKIP_CONFIRM=1 ;;
@@ -73,23 +67,7 @@ FORCE_FLASH=$_FORCE_FLASH;    unset _FORCE_FLASH
 SKIP_CONFIRM=$_SKIP_CONFIRM;  unset _SKIP_CONFIRM
 _HOSTNAME_CLI=$_HOSTNAME_FLAG; unset _HOSTNAME_FLAG
 
-if [[ -n "$_ENV_FILE" ]]; then
-    [[ -f "$_ENV_FILE" ]] || { echo "env file not found: $_ENV_FILE" >&2; exit 1; }
-else
-    _ENV_FILE="${SCRIPT_DIR}/$(hostname).env"
-    if [[ ! -f "$_ENV_FILE" ]]; then
-        [[ -f "${SCRIPT_DIR}/.env" ]] || { echo "No $(hostname).env or .env found in ${SCRIPT_DIR}; create one or use --env-file=PATH" >&2; exit 1; }
-        cp "${SCRIPT_DIR}/.env" "$_ENV_FILE"
-        echo "[WARN]  Created ${_ENV_FILE} from .env template." >&2
-        echo "[WARN]  Edit it with your machine-specific details before re-running." >&2
-        exit 1
-    fi
-fi
-set -a
-# shellcheck source=/dev/null
-source "$_ENV_FILE"
-set +a
-unset _ENV_FILE
+[[ -n "${THREAD_DATASET_TLV:-}" ]] || { echo "[ERROR] THREAD_DATASET_TLV not set — run via 'otbrstack flash'" >&2; exit 1; }
 
 # 1.3 Credentials — read from env file; THREAD_DATASET_TLV is required
 WIFI_SSID="${WIFI_SSID:-}"
@@ -105,7 +83,7 @@ OTBR_HOSTNAME="${_HOSTNAME_CLI:-${OTBR_HOSTNAME:-otbr-raspi4}}"
 unset _HOSTNAME_CLI
 
 # 1.4 Target block device from CLI
-TARGET_DEV="${1:?$'Usage: sudo ./flash-piotbr.sh [-f] [-y] [--env-file=PATH] [--hostname=NAME] /dev/sdX\n  -f  force full reflash\n  -y  skip confirmation prompt\n  --hostname=  device hostname (overrides OTBR_HOSTNAME in env)'}"
+TARGET_DEV="${1:?$'Usage: otbrstack flash [-f] [-y] [--hostname=NAME] /dev/sdX\n  -f  force full reflash\n  -y  skip confirmation prompt\n  --hostname=  device hostname (overrides OTBR_HOSTNAME in env)'}"
 
 # ---------------------------------------------------------------------------
 # 2. Helpers
@@ -691,6 +669,9 @@ ${NETPLAN_WIFIS}
       snap connect "\${SNAP}:network-control"
       snap connect "\${SNAP}:raw-usb"
       snap connect "\${SNAP}:avahi-control"
+
+      # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
+      snap list chip-tool &>/dev/null || snap install chip-tool
 
       # -- Determine backbone interface --------------------------------------
       INFRA=wlan0

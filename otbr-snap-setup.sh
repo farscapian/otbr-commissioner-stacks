@@ -16,15 +16,8 @@ PYSPINEL_VENV="${PYSPINEL_VENV:-${SCRIPT_DIR}/artifacts/pyspinel-venv}"
 ESPRESSIF_VENDOR_ID="303a"
 SONOFF_VENDOR_ID="10c4"
 SONOFF_PRODUCT_ID="ea60"
-if [[ -z "${ENV_FILE:-}" ]]; then
-    ENV_FILE="${SCRIPT_DIR}/$(hostname).env"
-    if [[ ! -f "$ENV_FILE" ]]; then
-        [[ -f "${SCRIPT_DIR}/.env" ]] \
-            || { echo "[ERROR] No $(hostname).env or .env found in ${SCRIPT_DIR}. Set ENV_FILE= to override." >&2; exit 1; }
-        cp "${SCRIPT_DIR}/.env" "$ENV_FILE"
-        echo "[INFO]  Created ${ENV_FILE} from .env."
-    fi
-fi
+# Env is loaded by otbrstack before invoking this script.
+[[ -n "${THREAD_DATASET_TLV:-}" ]] || { echo "[ERROR] THREAD_DATASET_TLV not set — run via 'otbrstack snap'" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 2. Helpers
@@ -37,29 +30,6 @@ require() {
     command -v "$1" &>/dev/null || die "Required command not found: $1"
 }
 
-
-# ---------------------------------------------------------------------------
-# 3. Load .env file
-# ---------------------------------------------------------------------------
-load_env() {
-    if [[ ! -f "$ENV_FILE" ]]; then
-        die ".env file not found at $ENV_FILE. Set ENV_FILE= to override the path."
-    fi
-
-    log "Loading environment from $ENV_FILE..."
-
-    # Source only valid KEY=VALUE lines, ignoring comments and blanks
-    while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line// }" ]] && continue
-        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-            export "${BASH_REMATCH[1]}"="${BASH_REMATCH[2]}"
-        fi
-    done < "$ENV_FILE"
-
-    [[ -n "${THREAD_DATASET_TLV:-}" ]] || die "THREAD_DATASET_TLV not set in $ENV_FILE"
-    log "THREAD_DATASET_TLV loaded (${#THREAD_DATASET_TLV} hex chars)."
-}
 
 # ---------------------------------------------------------------------------
 # 4a. Suppress ModemManager for ESP32-C6 (vendor 303a)
@@ -370,7 +340,7 @@ flash_rcp() {
         firmware="$fw_cache"
     else
         warn "No firmware source configured — cannot flash."
-        warn "Set one of these in $ENV_FILE:"
+        warn "Set one of these in your env file:"
         warn "  RCP_FIRMWARE_PATH=/path/to/esp_ot_rcp.bin"
         warn "  RCP_FIRMWARE_URL=https://example.com/esp_ot_rcp.bin"
         return 1
@@ -613,13 +583,26 @@ join_thread_network() {
 }
 
 # ---------------------------------------------------------------------------
-# 13. Main
+# 13. Install chip-tool snap (Matter commissioning — BLE+Thread and Thread-only)
+# ---------------------------------------------------------------------------
+install_chiptool() {
+    if snap list chip-tool &>/dev/null; then
+        log "chip-tool snap already installed."
+        return 0
+    fi
+    log "Installing chip-tool snap..."
+    sudo snap install chip-tool
+    log "chip-tool installed."
+}
+
+# ---------------------------------------------------------------------------
+# 14. Main
 # ---------------------------------------------------------------------------
 main() {
     [[ "$EUID" -eq 0 ]] && die "Do not run as root. Run as your normal user — sudo will be invoked as needed."
     require snap
 
-    load_env
+    log "THREAD_DATASET_TLV loaded (${#THREAD_DATASET_TLV} hex chars)."
     check_serial_group
     ensure_kernel_modules
     suppress_modemmanager
@@ -673,6 +656,7 @@ main() {
     ensure_snap_connections
     configure_ufw
     join_thread_network "$THREAD_DATASET_TLV"
+    install_chiptool
 
     log "Done."
 }
