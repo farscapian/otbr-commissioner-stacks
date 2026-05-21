@@ -102,7 +102,7 @@ require_cmd() {
 # 3. Pre-flight
 # ---------------------------------------------------------------------------
 
-require_cmd curl sha256sum xzcat dd lsblk partprobe python3 snap
+require_cmd curl sha256sum xzcat dd lsblk partprobe python3 snap rsync
 
 [[ -b "$TARGET_DEV" ]] || die "$TARGET_DEV is not a block device."
 
@@ -163,6 +163,9 @@ else
 fi
 
 if [[ "$CLOUD_INIT_ONLY" -eq 0 ]]; then
+    command -v qemu-aarch64 &>/dev/null \
+        || die "qemu-aarch64 not found — required for arm64 chroot.\n  Install with: sudo apt-get install qemu-user-binfmt"
+
     if [[ "$SKIP_CONFIRM" -eq 1 ]]; then
         warn "Skipping confirmation (-y). ALL DATA ON $TARGET_DEV WILL BE DESTROYED."
     else
@@ -171,28 +174,6 @@ if [[ "$CLOUD_INIT_ONLY" -eq 0 ]]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# 4. Thread RCP detection (ESP32-C6, SONOFF CP210x, or any ttyACM*/ttyUSB*)
-# ---------------------------------------------------------------------------
-
-find_rcp() {
-    local candidates=()
-    for p in /dev/ttyUSB* /dev/ttyACM*; do [[ -e "$p" ]] && candidates+=("$p"); done
-
-    if [[ ${#candidates[@]} -eq 0 ]]; then
-        warn "No USB serial devices found. RCP_DEVICE will be auto-detected at boot."
-        RCP_DEVICE="__AUTODETECT__"
-        return
-    fi
-
-    RCP_DEVICE="${candidates[0]}"
-    info "USB serial candidates: ${candidates[*]}"
-    info "RCP device: $RCP_DEVICE"
-}
-
-find_rcp
-
-[[ "$RCP_DEVICE" != "__AUTODETECT__" ]] && info "Host RCP: $RCP_DEVICE (informational — Pi auto-detects at boot)"
 
 # ---------------------------------------------------------------------------
 # 5. Image download, verification, and flash (skipped in cloud-init-only mode)
@@ -291,17 +272,42 @@ info "Mounted $BOOT_PART at $MOUNT_DIR"
 _CMDLINE_FILE="${MOUNT_DIR}/cmdline.txt"
 if [[ -f "$_CMDLINE_FILE" ]]; then
     _CMDLINE=$(cat "$_CMDLINE_FILE")
+    _CMDLINE_CHANGED=0
     if [[ "$_CMDLINE" != *cfg80211.ieee80211_regdom=* ]]; then
-        printf '%s cfg80211.ieee80211_regdom=US\n' "${_CMDLINE%$'\n'}" \
-            > "$_CMDLINE_FILE"
-        info "Patched cmdline.txt: added cfg80211.ieee80211_regdom=US"
-    else
-        info "cmdline.txt already has cfg80211.ieee80211_regdom — skipped"
+        _CMDLINE="${_CMDLINE%$'\n'} cfg80211.ieee80211_regdom=US"
+        _CMDLINE_CHANGED=1
     fi
+    if [[ "$_CMDLINE" != *brcmfmac.feature_disable=* ]]; then
+        _CMDLINE="${_CMDLINE%$'\n'} brcmfmac.feature_disable=0x82000"
+        _CMDLINE_CHANGED=1
+    fi
+    if [[ "$_CMDLINE_CHANGED" -eq 1 ]]; then
+        printf '%s\n' "$_CMDLINE" > "$_CMDLINE_FILE"
+        info "Patched cmdline.txt: cfg80211.ieee80211_regdom=US brcmfmac.feature_disable=0x82000"
+    else
+        info "cmdline.txt already patched — skipped"
+    fi
+    unset _CMDLINE_CHANGED
 else
     warn "cmdline.txt not found in system-boot — regulatory param not added"
 fi
 unset _CMDLINE_FILE _CMDLINE
+
+# Patch config.txt with country=US — Pi firmware reads this before brcmfmac
+# loads, making it the most authoritative regulatory source.
+_CONFIG_FILE="${MOUNT_DIR}/config.txt"
+if [[ -f "$_CONFIG_FILE" ]]; then
+    if grep -q "^country=" "$_CONFIG_FILE"; then
+        sed -i "s/^country=.*/country=US/" "$_CONFIG_FILE"
+        info "config.txt: updated country=US"
+    else
+        echo "country=US" >> "$_CONFIG_FILE"
+        info "config.txt: added country=US"
+    fi
+else
+    warn "config.txt not found in system-boot — Pi firmware regulatory not set"
+fi
+unset _CONFIG_FILE
 
 # Ubuntu Server NoCloud datasource reads user-data/meta-data from the
 # root of the system-boot partition, not a subdirectory.
@@ -332,12 +338,15 @@ if [[ -n "$WIFI_SSID" && -n "$WIFI_PASSWORD" ]]; then
         wifis:
           wlan0:
             dhcp4: true
+            optional: true
             dhcp4-overrides:
               route-metric: 200
             regulatory-domain: US
             access-points:
               "${WIFI_SSID}":
-                password: "${WIFI_PASSWORD}"
+                auth:
+                  key-management: psk
+                  password: "${WIFI_PASSWORD}"
 WIFISECT
 )
 fi
@@ -371,6 +380,11 @@ cat > "${CI_DIR}/user-data" <<USERDATA
 #cloud-config
 
 ${USERS_SECTION}
+
+# Install iw before runcmd so 'iw reg set US' works.  The packages module
+# runs earlier in cloud-init's lifecycle than runcmd.
+packages:
+  - iw
 
 # --------------------------------------------------------------------------
 # 9.1 File payloads
@@ -418,14 +432,18 @@ ${NETPLAN_WIFIS}
     content: |
       options cfg80211 ieee80211_regdom=US
 
-  # Disable brcmfmac background roaming scans. On BCM4345/6 (Pi 4B) firmware
-  # 7.45.265, the scan loop rejects 5 GHz channels as out-of-regulatory and
-  # then crashes at epc 0x000089d8. roamoff=1 prevents the scan loop entirely.
+  # roamoff=1   — disables background roaming scans (prevents scan-loop crash)
+  # feature_disable=0x82000 — disables SAE offload (0x80000) + SWSUP (0x2000).
+  #   BCM4345/6 (Pi 4B) brcmfmac SAE firmware engine is broken: attempting SAE
+  #   auth against WPA2+WPA3 transition-mode APs produces ASSOC-REJECT
+  #   status_code=16 with bssid=00:00:00:00:00:00 (locally generated).
+  #   Disabling offload forces wpa_supplicant to handle auth in software and
+  #   fall back cleanly to WPA2-PSK.
   - path: /etc/modprobe.d/brcmfmac.conf
     owner: root:root
     permissions: '0644'
     content: |
-      options brcmfmac roamoff=1
+      options brcmfmac roamoff=1 feature_disable=0x82000
 
   # Apply regulatory domain and disable power save as soon as wlan* appears.
   # udev fires at driver init (~14 s), well before runcmd (~35 s), so the
@@ -711,6 +729,13 @@ ${NETPLAN_WIFIS}
 
       echo "=== OTBR first-boot \$(date) ==="
 
+      # Patch Pi firmware country code — authoritative for brcmfmac regulatory.
+      if grep -q "^country=" /boot/firmware/config.txt 2>/dev/null; then
+        sed -i "s/^country=.*/country=US/" /boot/firmware/config.txt
+      else
+        echo "country=US" >> /boot/firmware/config.txt
+      fi
+
       # -- Wait for snapd to be fully seeded ---------------------------------
       snap wait system seed.loaded
 
@@ -720,6 +745,18 @@ ${NETPLAN_WIFIS}
       # finishing DHCP and systemd-resolved having a working nameserver.
       networkctl wait-online --any --timeout=120 2>/dev/null || true
 
+      # -- Wait for NTP clock sync before apt (Pi has no RTC; clock starts ----
+      # wrong and apt rejects release files with "not valid yet" errors until
+      # timesyncd has corrected it).
+      for _i in \$(seq 1 60); do
+        if timedatectl show --property=NTPSynchronized --value 2>/dev/null | grep -q yes; then
+          echo "Clock synchronized (\${_i} attempts)."
+          break
+        fi
+        echo "Waiting for NTP sync (\${_i}/60)..."
+        sleep 5
+      done
+
       # -- Wait for snap store DNS to resolve (systemd-resolved can be slow) --
       for _i in \$(seq 1 30); do
         getent hosts api.snapcraft.io >/dev/null 2>&1 && break
@@ -727,20 +764,51 @@ ${NETPLAN_WIFIS}
         sleep 5
       done
 
-      # -- Install/upgrade packages (DNS is guaranteed up at this point) -------
+      # -- Install/upgrade packages -------------------------------------------
+      # Packages are pre-installed at flash time via chroot when qemu-user-static
+      # is available; these calls are fast no-ops in that case.  They also ensure
+      # packages are present when flashing without qemu-user-static.
+      # Stop unattended-upgrades first to avoid dpkg lock contention.
+      systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+      for _i in \$(seq 1 30); do
+        fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+        echo "Waiting for dpkg lock (\${_i}/30)..."
+        sleep 5
+      done
       apt-get update -q
-      apt-get install -y avahi-daemon iw git cmake ninja-build python3-venv python3-pip libusb-1.0-0
+      apt-get upgrade -y -q
+      apt-get install -y avahi-daemon iw git cmake ninja-build python3-venv python3-pip python3-dbus python3-gi libusb-1.0-0
       # Upgrade linux-firmware to get the latest BCM4345/6 CLM blob, which
       # defines allowed 5 GHz channels. The version shipped in the base image
       # is often months stale and causes reason -52 channel rejections.
       apt-get install -y --only-upgrade linux-firmware || true
 
-      # -- Install snap from store (retry on transient network errors) --------
-      for _i in \$(seq 1 5); do
-        snap install "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} && break
-        echo "Snap install attempt \$_i failed; retrying in 15s ..."
-        sleep 15
-      done
+      # -- Ensure snap is installed -------------------------------------------
+      # If the snap was pre-seeded at flash time (seed.yaml), snapd installs it
+      # automatically during its first-boot seeding phase (snap wait system
+      # seed.loaded completes only after seeding is done).  If seeding did not
+      # include the snap, try the pre-loaded file, then fall back to the store.
+      if ! snap list "\$SNAP" &>/dev/null; then
+        _snap_file=\$(ls /opt/otbr-snap/*.snap 2>/dev/null | head -1)
+        if [[ -n "\$_snap_file" ]]; then
+          echo "Installing \$SNAP from pre-loaded file: \$(basename "\$_snap_file")"
+          _assert="\${_snap_file%.snap}.assert"
+          [[ -f "\$_assert" ]] && snap ack "\$_assert" 2>/dev/null || true
+          if ! snap install "\$_snap_file" 2>/dev/null; then
+            echo "\$SNAP assertion check failed — retrying with --dangerous"
+            snap install --dangerous "\$_snap_file" || true
+          fi
+          snap switch "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} 2>/dev/null || true
+        fi
+      fi
+      if ! snap list "\$SNAP" &>/dev/null; then
+        echo "\$SNAP not yet installed — installing from store ..."
+        for _i in \$(seq 1 5); do
+          snap install "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} && break
+          echo "Snap install attempt \$_i failed; retrying in 15s ..."
+          sleep 15
+        done
+      fi
 
       # -- Connect interfaces ------------------------------------------------
       snap connect "\${SNAP}:firewall-control"
@@ -892,7 +960,7 @@ else
             "$_ROOT_DIR/etc/udev/rules.d"
 
         sudo tee "$_ROOT_DIR/etc/modprobe.d/brcmfmac.conf" > /dev/null <<'BRCM'
-options brcmfmac roamoff=1
+options brcmfmac roamoff=1 feature_disable=0x82000
 BRCM
 
         sudo tee "$_ROOT_DIR/etc/modprobe.d/cfg80211.conf" > /dev/null <<'CFG'
@@ -904,6 +972,279 @@ ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw reg set US"
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set country US"
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set power_save off"
 UDEV
+
+        # Pre-load development assets so the Pi doesn't need to download them
+        # on first boot.  All sections are conditional — skipped if not cached.
+        # Only done on a full flash; cloud-init-only updates leave the live Pi
+        # filesystem alone.
+        if [[ "$CLOUD_INIT_ONLY" -eq 0 ]]; then
+
+            # ------------------------------------------------------------------
+            # Pre-load ESP-IDF source BEFORE the chroot so install.sh is
+            # available inside it.  Build/ dirs are excluded — they hold
+            # host-arch (x86_64) objects that are useless on the Pi.
+            # ------------------------------------------------------------------
+            if [[ -d "${SCRIPT_DIR}/cache/esp-idf" ]]; then
+                _idf_size=$(du -sh "${SCRIPT_DIR}/cache/esp-idf" | cut -f1)
+                info "Pre-loading ESP-IDF source (${_idf_size}, skipping build/ dirs) → /opt/esp-idf ..."
+                sudo mkdir -p "$_ROOT_DIR/opt/esp-idf"
+                sudo rsync -a --exclude='build/' \
+                    "${SCRIPT_DIR}/cache/esp-idf/" "$_ROOT_DIR/opt/esp-idf"
+                info "ESP-IDF source pre-loaded."
+            else
+                info "cache/esp-idf not found — Pi will clone ESP-IDF on first boot."
+            fi
+
+            # ------------------------------------------------------------------
+            # Decide whether to build RCP firmware inside the chroot.
+            # The ESP32-C6 binary is RISC-V — identical bytes whether the
+            # cross-compiler ran on x86_64 or arm64.  Building here populates
+            # the host cache and pre-seeds the SD card so the Pi skips the
+            # build entirely on first boot.
+            # ------------------------------------------------------------------
+            _do_rcp_build=0
+            if [[ ! -f "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" ]]; then
+                if [[ -d "$_ROOT_DIR/opt/esp-idf" ]]; then
+                    _do_rcp_build=1
+                    info "No cached RCP firmware — will build inside arm64 chroot (~10 min)."
+                else
+                    info "No ESP-IDF source and no cached firmware — Pi will build on first boot."
+                fi
+            else
+                info "Cached RCP firmware found — skipping chroot build."
+            fi
+
+            # ------------------------------------------------------------------
+            # Chroot: apt upgrade + install + ESP-IDF toolchain + optional build.
+            # The binfmt_misc entry for qemu-aarch64 uses the F (fix-binary)
+            # flag so the kernel holds the interpreter open — no copy needed.
+            #
+            # The setup script is written to a temp file (not passed via -c)
+            # so the host can expand ${_do_rcp_build} into the script body.
+            # Literal backslashes must be doubled (\\) and literal $ escaped (\$).
+            # ------------------------------------------------------------------
+            info "Running arm64 chroot — apt upgrade + install + ESP-IDF toolchain ..."
+            sudo mkdir -p "$_ROOT_DIR/tmp"
+            sudo tee "$_ROOT_DIR/tmp/otbr-chroot-setup.sh" > /dev/null <<CHROOTSCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -q
+apt-get upgrade -y
+apt-get install -y \\
+    avahi-daemon iw zstd \\
+    git cmake ninja-build \\
+    python3-venv python3-pip \\
+    python3-dbus python3-gi \\
+    libusb-1.0-0
+
+if [[ -x /opt/esp-idf/install.sh ]]; then
+    export IDF_TOOLS_PATH=/opt/esp-idf-tools
+    /opt/esp-idf/install.sh esp32c6
+
+    if [[ "${_do_rcp_build}" == "1" ]]; then
+        echo "[chroot] Building ESP32-C6 RCP firmware with arm64 toolchain ..."
+        source /opt/esp-idf/export.sh
+        set -euo pipefail
+        _rcp_dir=/opt/esp-idf/examples/openthread/ot_rcp
+        cat > "\${_rcp_dir}/sdkconfig.defaults.otbrstack" <<'SDKEOF'
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y
+CONFIG_OPENTHREAD_RADIO=y
+CONFIG_OPENTHREAD_RADIO_NATIVE=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=n
+SDKEOF
+        cd "\${_rcp_dir}"
+        export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.otbrstack"
+        idf.py set-target esp32c6
+        idf.py build
+        echo "[chroot] RCP firmware build complete."
+    fi
+fi
+
+# Patch brcmfmac NVRAM with ccode=US — the firmware reads this before
+# any kernel regulatory stack, eliminating reason -52 channel rejections.
+_nvram=\$(readlink -f /usr/lib/firmware/brcm/brcmfmac43455-sdio.raspberrypi,4-model-b.txt.zst 2>/dev/null)
+if [[ -n "\$_nvram" && -f "\$_nvram" ]]; then
+    zstd -d "\$_nvram" -o /tmp/nvram-pi4b.txt
+    printf '\nccode=US\nregrev=0\n' >> /tmp/nvram-pi4b.txt
+    zstd -19 -f /tmp/nvram-pi4b.txt -o "\$_nvram"
+    echo "[chroot] brcmfmac NVRAM patched with ccode=US"
+else
+    echo "[chroot] WARNING: brcmfmac NVRAM not found — skipping patch" >&2
+fi
+
+# Free space consumed by downloaded .deb archives and man-page cache.
+# This reclaims ~100-150 MB before snap/ESP-IDF assets are copied in.
+apt-get clean
+rm -rf /var/cache/man/* /var/lib/apt/lists/*
+CHROOTSCRIPT
+            sudo chmod +x "$_ROOT_DIR/tmp/otbr-chroot-setup.sh"
+            # Temporarily replace resolv.conf — on Ubuntu 26.04 it is a
+            # dangling symlink to /run/systemd/resolve/stub-resolv.conf which
+            # doesn't exist in a bare mounted image.
+            sudo rm -f "$_ROOT_DIR/etc/resolv.conf"
+            echo "nameserver 8.8.8.8" | sudo tee "$_ROOT_DIR/etc/resolv.conf" > /dev/null
+            # Bind-mount the host-side toolchain cache at /opt/esp-idf-tools so
+            # install.sh writes the arm64 riscv32-esp-elf toolchain to the HOST
+            # cache instead of the 4 GB SD card root partition (which has no
+            # room for it).  The Pi downloads the toolchain on first boot.
+            _IDF_TOOLS_CACHE="${SCRIPT_DIR}/cache/esp-idf-tools-arm64"
+            mkdir -p "$_IDF_TOOLS_CACHE"
+            sudo mkdir -p "$_ROOT_DIR/opt/esp-idf-tools"
+            sudo mount --bind "$_IDF_TOOLS_CACHE" "$_ROOT_DIR/opt/esp-idf-tools"
+            sudo mount --bind /proc    "$_ROOT_DIR/proc"
+            sudo mount --bind /sys     "$_ROOT_DIR/sys"
+            sudo mount --bind /dev     "$_ROOT_DIR/dev"
+            sudo mount --bind /dev/pts "$_ROOT_DIR/dev/pts"
+            sudo chroot "$_ROOT_DIR" /bin/bash /tmp/otbr-chroot-setup.sh \
+                || warn "chroot operation encountered errors — continuing."
+            sudo umount "$_ROOT_DIR/dev/pts"         2>/dev/null || true
+            sudo umount "$_ROOT_DIR/dev"             2>/dev/null || true
+            sudo umount "$_ROOT_DIR/sys"             2>/dev/null || true
+            sudo umount "$_ROOT_DIR/proc"            2>/dev/null || true
+            sudo umount "$_ROOT_DIR/opt/esp-idf-tools" 2>/dev/null || true
+            sudo rm -f "$_ROOT_DIR/tmp/otbr-chroot-setup.sh"
+            # Restore the standard Ubuntu 26.04 resolv.conf symlink
+            sudo rm -f "$_ROOT_DIR/etc/resolv.conf"
+            sudo ln -sf /run/systemd/resolve/stub-resolv.conf \
+                "$_ROOT_DIR/etc/resolv.conf"
+            info "chroot complete."
+
+            # ------------------------------------------------------------------
+            # If we built RCP firmware in the chroot, copy it to the host cache
+            # so subsequent flashes skip the build entirely.  The copy below
+            # then seeds the binary onto the SD card.
+            # ------------------------------------------------------------------
+            _built_bin="$_ROOT_DIR/opt/esp-idf/examples/openthread/ot_rcp/build/esp_ot_rcp.bin"
+            if [[ "$_do_rcp_build" -eq 1 && -f "$_built_bin" ]]; then
+                mkdir -p "${SCRIPT_DIR}/cache/esp32/rcp"
+                sudo cp "$_built_bin" "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin"
+                sudo chown "$(id -u):$(id -g)" \
+                    "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin"
+                info "RCP firmware cached: cache/esp32/rcp/esp_ot_rcp.bin"
+            elif [[ "$_do_rcp_build" -eq 1 ]]; then
+                warn "RCP build was requested but binary not found — Pi will build on first boot."
+            fi
+            unset _built_bin _do_rcp_build
+
+            # ------------------------------------------------------------------
+            # Ensure we have the arm64 snap.  cache/snap/ holds the host-arch
+            # (amd64) version used by Incus x64 VMs.  For the Pi we need arm64.
+            # `snap download` has no --arch flag; use the Snap Store REST API.
+            # ------------------------------------------------------------------
+            _SNAP_ARM64="${SCRIPT_DIR}/cache/snap-arm64"
+            mkdir -p "$_SNAP_ARM64"
+            if ! compgen -G "${_SNAP_ARM64}/openthread-border-router_*.snap" > /dev/null 2>&1; then
+                info "Fetching arm64 snap metadata from Snap Store ..."
+                _snap_ok=1
+                _snap_info=""
+                if ! _snap_info=$(curl -fsSL \
+                        --retry 3 --retry-delay 5 --max-time 60 \
+                        -H 'Snap-Device-Series: 16' \
+                        -H 'Snap-Device-Architecture: arm64' \
+                        "https://api.snapcraft.io/v2/snaps/info/openthread-border-router?fields=channel-map,snap-id"); then
+                    warn "Snap Store API unreachable — Pi will install snap from store on first boot."
+                    _snap_ok=0
+                fi
+
+                if [[ "$_snap_ok" -eq 1 ]]; then
+                    read -r _snap_id _dl_url _revision _sha3 < <(echo "$_snap_info" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+snap_id = d.get('snap-id', '')
+channel = sys.argv[1]
+for e in d.get('channel-map', []):
+    c = e.get('channel', {})
+    if c.get('name') == channel and c.get('architecture') == 'arm64':
+        dl = e.get('download', {})
+        print(snap_id, dl['url'], e['revision'], dl['sha3-384'])
+        sys.exit(0)
+print(snap_id, '', '', '')
+" "${OTBR_SNAP_CHANNEL}")
+                    if [[ -z "$_dl_url" ]]; then
+                        warn "No arm64 openthread-border-router found on channel ${OTBR_SNAP_CHANNEL} — Pi will install from store."
+                        _snap_ok=0
+                    fi
+                fi
+
+                if [[ "$_snap_ok" -eq 1 ]]; then
+                    _snap_basename="openthread-border-router_${_revision}"
+                    info "Downloading ${_snap_basename}.snap (arm64) ..."
+                    if curl -fL --progress-bar \
+                            --retry 3 --retry-delay 10 --max-time 600 \
+                            -o "${_SNAP_ARM64}/${_snap_basename}.snap" \
+                            "$_dl_url"; then
+                        # Fetch snap-revision + snap-declaration assertions.
+                        # Canonical's account-key is built into snapd, so these two
+                        # are sufficient for `snap ack` to verify the snap.
+                        {
+                            curl -fsSL --retry 3 --retry-delay 5 --max-time 30 \
+                                "https://assertions.ubuntu.com/v1/assertions/snap-revision;snap-sha3-384=${_sha3}"
+                            printf '\n\n'
+                            curl -fsSL --retry 3 --retry-delay 5 --max-time 30 \
+                                "https://assertions.ubuntu.com/v1/assertions/snap-declaration;series=16;snap-id=${_snap_id}"
+                        } > "${_SNAP_ARM64}/${_snap_basename}.assert" \
+                            || warn "Could not fetch snap assertions — Pi may need store on first boot."
+                        info "arm64 snap cached: ${_snap_basename}"
+                    else
+                        warn "Failed to download arm64 snap — Pi will install from store on first boot."
+                        rm -f "${_SNAP_ARM64}/${_snap_basename}.snap"
+                    fi
+                    unset _snap_id _dl_url _revision _sha3 _snap_basename
+                fi
+                unset _snap_info _snap_ok
+            else
+                info "arm64 snap cached: $(basename "$(ls "${_SNAP_ARM64}"/openthread-border-router_*.snap | head -1)")"
+            fi
+
+            # Pre-seed the OTBR snap so snapd installs it offline on first
+            # boot without contacting the snap store.
+            _snap_src=$(ls "${_SNAP_ARM64}"/openthread-border-router_*.snap 2>/dev/null | head -1)
+            if [[ -n "$_snap_src" ]]; then
+                _snap_assert="${_snap_src%.snap}.assert"
+                _snap_basename=$(basename "$_snap_src")
+                sudo mkdir -p \
+                    "$_ROOT_DIR/var/lib/snapd/seed/snaps" \
+                    "$_ROOT_DIR/var/lib/snapd/seed/assertions"
+                sudo cp "$_snap_src" \
+                    "$_ROOT_DIR/var/lib/snapd/seed/snaps/$_snap_basename"
+                [[ -f "$_snap_assert" ]] && sudo cp "$_snap_assert" \
+                    "$_ROOT_DIR/var/lib/snapd/seed/assertions/$(basename "$_snap_assert")"
+                sudo tee "$_ROOT_DIR/var/lib/snapd/seed/seed.yaml" > /dev/null <<SEEDEOF
+snaps:
+  - name: openthread-border-router
+    channel: ${OTBR_SNAP_CHANNEL}
+    file: ${_snap_basename}
+SEEDEOF
+                info "OTBR snap seeded: $_snap_basename"
+            fi
+
+            # Pre-built RCP binary — flash_rcp.sh compares sha256 against this;
+            # identical hash skips the flash step on first boot.
+            if [[ -f "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" ]]; then
+                sudo mkdir -p "$_ROOT_DIR/var/lib/otbr"
+                sudo cp "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" \
+                    "$_ROOT_DIR/var/lib/otbr/"
+                info "RCP binary pre-loaded: /var/lib/otbr/esp_ot_rcp.bin"
+            fi
+
+            # OTBR snap + assertion at /opt/otbr-snap/ — firstboot.sh uses this
+            # as a fallback if the snapd seed doesn't work.
+            _snap_src=("${_SNAP_ARM64}"/openthread-border-router_*.snap)
+            if [[ -f "${_snap_src[0]}" ]]; then
+                sudo mkdir -p "$_ROOT_DIR/opt/otbr-snap"
+                sudo cp "${_SNAP_ARM64}"/openthread-border-router_*.snap \
+                        "${_SNAP_ARM64}"/openthread-border-router_*.assert \
+                    "$_ROOT_DIR/opt/otbr-snap/" 2>/dev/null || true
+                info "OTBR snap pre-loaded: $(basename "${_snap_src[0]}")"
+            else
+                info "arm64 snap not cached — Pi will install from snap store."
+            fi
+            unset _SNAP_ARM64 _snap_src _snap_assert _snap_basename
+
+        fi  # CLOUD_INIT_ONLY=0
 
         sudo umount "$_ROOT_DIR"
         rmdir "$_ROOT_DIR"
