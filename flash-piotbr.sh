@@ -698,7 +698,6 @@ ${NETPLAN_WIFIS}
 
       [Timer]
       OnCalendar=weekly
-      Persistent=true
       Unit=otbr-weekly-reboot.service
 
       [Install]
@@ -811,48 +810,54 @@ ${NETPLAN_WIFIS}
       fi
 
       # -- Connect interfaces ------------------------------------------------
-      snap connect "\${SNAP}:firewall-control"
-      snap connect "\${SNAP}:network-control"
-      snap connect "\${SNAP}:raw-usb"
-      snap connect "\${SNAP}:avahi-control"
+      snap connect "\${SNAP}:firewall-control" || true
+      snap connect "\${SNAP}:network-control"  || true
+      snap connect "\${SNAP}:raw-usb"          || true
+      snap connect "\${SNAP}:avahi-control"    || true
 
       # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
-      snap list chip-tool &>/dev/null || snap install chip-tool
+      snap list chip-tool &>/dev/null || snap install chip-tool || true
 
       # -- Update/flash RCP firmware; sets snap radio-url ------------------
       mkdir -p /var/lib/otbr
       /usr/local/sbin/otbr-rcp-update.sh
 
-      # -- Determine backbone interface --------------------------------------
-      INFRA=wlan0
-      if ip link show eth0 2>/dev/null | grep -q 'LOWER_UP'; then
-        INFRA=eth0
+      # -- Snap-dependent setup (skip if snap install failed) ---------------
+      if snap list "\$SNAP" &>/dev/null; then
+        # -- Determine backbone interface ------------------------------------
+        INFRA=wlan0
+        if ip link show eth0 2>/dev/null | grep -q 'LOWER_UP'; then
+          INFRA=eth0
+        fi
+        echo "Backbone interface: \$INFRA"
+
+        # -- Configure snap (radio-url already set by otbr-rcp-update.sh) --
+        snap set "\$SNAP" \
+          infra-if="\$INFRA" \
+          thread-if=wpan0 \
+          autostart=true
+
+        # -- Start the snap service -----------------------------------------
+        snap start --enable "\$SNAP"
+
+        # -- Start interface watcher for immediate eth0/wlan0 failover ------
+        systemctl start otbr-ifwatcher.service || true
+
+        # -- Seed Thread dataset ---------------------------------------------
+        # Wait up to 30 s for the agent socket to appear
+        for i in \$(seq 1 30); do
+          "\$SNAP".ot-ctl state 2>/dev/null && break || sleep 1
+        done
+
+        echo "Committing Thread dataset TLV ..."
+        "\$SNAP".ot-ctl dataset set active "\$TLV"
+        "\$SNAP".ot-ctl dataset commit active
+        "\$SNAP".ot-ctl ifconfig up
+        "\$SNAP".ot-ctl thread start
+      else
+        echo "WARNING: \$SNAP not installed — skipping OTBR configuration."
+        echo "         Re-run /usr/local/sbin/otbr-firstboot.sh once the snap store is reachable."
       fi
-      echo "Backbone interface: \$INFRA"
-
-      # -- Configure snap (radio-url already set by otbr-rcp-update.sh) ---
-      snap set "\$SNAP" \
-        infra-if="\$INFRA" \
-        thread-if=wpan0 \
-        autostart=true
-
-      # -- Start the snap service --------------------------------------------
-      snap start --enable "\$SNAP"
-
-      # -- Start interface watcher for immediate eth0/wlan0 failover --------
-      systemctl start otbr-ifwatcher.service || true
-
-      # -- Seed Thread dataset -----------------------------------------------
-      # Wait up to 30 s for the agent socket to appear
-      for i in \$(seq 1 30); do
-        "\$SNAP".ot-ctl state 2>/dev/null && break || sleep 1
-      done
-
-      echo "Committing Thread dataset TLV ..."
-      "\$SNAP".ot-ctl dataset set active "\$TLV"
-      "\$SNAP".ot-ctl dataset commit active
-      "\$SNAP".ot-ctl ifconfig up
-      "\$SNAP".ot-ctl thread start
 
       # -- Configure UFW firewall --------------------------------------------
       ufw --force reset
