@@ -20,7 +20,7 @@ otbrstack() {
     done
 
     # Resolve and export env for all commands that need it (everything except logs/help).
-    if [[ -n "$cmd" && "$cmd" != "logs" ]]; then
+    if [[ -n "$cmd" && "$cmd" != "logs" && "$cmd" != "shutdown" && "$cmd" != "restart" ]]; then
         if [[ -n "$_env_file" ]]; then
             if [[ ! -f "$_env_file" ]]; then
                 echo "[otbrstack] env file not found: $_env_file" >&2; return 1
@@ -74,6 +74,24 @@ otbrstack() {
             echo "[otbrstack] Snap bare-metal provisioner"
             "$_OTBRSTACK_DIR/otbr-snap-setup.sh" "${_pass_args[@]+"${_pass_args[@]}"}"
             ;;
+        shutdown)
+            local _host="${_pass_args[0]:-}"
+            if [[ -z "$_host" ]]; then
+                echo "Usage: otbrstack shutdown <ssh_host>"
+                return 1
+            fi
+            echo "[otbrstack] Shutting down ${_host} ..."
+            ssh "$_host" -- sudo shutdown -h now
+            ;;
+        restart)
+            local _host="${_pass_args[0]:-}"
+            if [[ -z "$_host" ]]; then
+                echo "Usage: otbrstack restart <ssh_host>"
+                return 1
+            fi
+            echo "[otbrstack] Restarting ${_host} ..."
+            ssh "$_host" -- sudo reboot
+            ;;
         logs)
             local _follow=0 _host=""
             for _arg in "${_pass_args[@]+"${_pass_args[@]}"}"; do
@@ -116,6 +134,8 @@ otbrstack() {
             echo "  docker        Docker bare-metal provisioner"
             echo "  snap          Snap bare-metal provisioner"
             echo "  logs [-f] <host>  Tail cloud-init + firstboot + OTBR snap logs over SSH"
+  echo "  shutdown <host>   Graceful shutdown of a remote OTBR device"
+  echo "  restart <host>    Reboot a remote OTBR device"
             [[ -n "$cmd" ]] && return 1 || return 0
             ;;
     esac
