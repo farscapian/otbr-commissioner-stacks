@@ -10,6 +10,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BAUD=460800
+IDF_PATH="${IDF_PATH:-}"
 INFRA_IF="${INFRA_IF:-$(ip route show default | awk '/default/ {print $5; exit}')}"
 THREAD_IF="${THREAD_IF:-wpan0}"
 PYSPINEL_VENV="${PYSPINEL_VENV:-${SCRIPT_DIR}/artifacts/pyspinel-venv}"
@@ -271,17 +272,39 @@ reload_rcp_device() {
 
 
 # ---------------------------------------------------------------------------
-# 7. Verify RCP firmware via raw HDLC spinel probe (ESP32-C6 only)
-# Sends PROP_VALUE_GET(PROP_NCP_VERSION) and checks for any HDLC response.
-# Uses only Python stdlib — no pyspinel dependency.
+# 7. Pyspinel venv — created on first run, reused thereafter.
+# ---------------------------------------------------------------------------
+ensure_pyspinel_venv() {
+    if "${PYSPINEL_VENV}/bin/python3" -c "import serial" 2>/dev/null; then
+        return 0
+    fi
+    log "Setting up pyspinel venv at ${PYSPINEL_VENV} ..."
+    rm -rf "$PYSPINEL_VENV"
+    mkdir -p "$(dirname "$PYSPINEL_VENV")"
+    python3 -m venv "$PYSPINEL_VENV"
+    "$PYSPINEL_VENV/bin/pip" install --quiet pyspinel
+}
+
+# ---------------------------------------------------------------------------
+# 7b. Verify RCP firmware via Spinel PROP_VALUE_GET(NCP_VERSION).
+#     Uses pyserial (from the pyspinel venv) for reliable serial I/O.
+#     Raw fd + tty.setraw() was unreliable: wrong termios setup, and
+#     O_NONBLOCK interacts poorly with select on some CDC-ACM drivers.
 # ---------------------------------------------------------------------------
 verify_rcp() {
     local port="$1"
 
+    ensure_pyspinel_venv
+
     log "Verifying RCP firmware on $port via spinel..."
 
-    if python3 - "$port" 2>/dev/null << 'PYEOF'
-import sys, os, struct, time, tty, select, fcntl
+    if "${PYSPINEL_VENV}/bin/python3" - "$port" << 'PYEOF'
+import sys, struct, time
+try:
+    import serial
+except ImportError as e:
+    print(f"ImportError: {e}", file=sys.stderr)
+    sys.exit(2)
 port = sys.argv[1]
 HDLC_FLAG = 0x7E
 def fcs16(d):
@@ -290,7 +313,7 @@ def fcs16(d):
         c ^= b
         for _ in range(8): c = (c >> 1) ^ 0x8408 if c & 1 else c >> 1
     return c ^ 0xFFFF
-payload = bytes([0x80, 0x02, 0x02])
+payload = bytes([0x81, 0x02, 0x02])  # TID=1: response expected; TID=0 (0x80) is unsolicited/no-reply
 raw = payload + struct.pack('<H', fcs16(payload))
 frame = bytearray([HDLC_FLAG])
 for b in raw:
@@ -298,15 +321,34 @@ for b in raw:
     else: frame.append(b)
 frame.append(HDLC_FLAG)
 try:
-    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    fcntl.ioctl(fd, 0x5416, struct.pack('I', 0x0002))  # TIOCMBIS TIOCM_DTR
-    tty.setraw(fd)  # raw mode: bytes delivered immediately, not held for newline
-    os.write(fd, bytes(frame)); time.sleep(1.0)
-    ready, _, _ = select.select([fd], [], [], 3.0)
-    resp = os.read(fd, 256) if ready else b''
-    os.close(fd)
-    sys.exit(0 if HDLC_FLAG in resp and len(resp) > 4 else 1)
-except: sys.exit(1)
+    ser = serial.Serial()
+    ser.port = port
+    ser.baudrate = 460800
+    ser.timeout = 4
+    ser.dsrdtr = False
+    ser.rtscts = False
+    ser.open()
+    # Opening the port via CDC-ACM causes the kernel to assert DTR, which
+    # triggers the ESP32-C6 USB Serial/JTAG hardware auto-reset. This is
+    # not configurable — deassert immediately and wait for the device to
+    # finish rebooting and the Spinel stack to initialize (~4s).
+    ser.dtr = False
+    ser.rts = False
+    ser.reset_input_buffer()
+    time.sleep(4)
+    ser.reset_input_buffer()
+    ser.write(bytes(frame))
+    time.sleep(0.5)
+    resp = ser.read(256)
+    ser.close()
+    if HDLC_FLAG in resp and len(resp) > 4:
+        sys.exit(0)
+    else:
+        print(f"No valid Spinel response ({len(resp)} bytes: {resp[:32].hex()})", file=sys.stderr)
+        sys.exit(1)
+except Exception as e:
+    print(f"Spinel probe error: {type(e).__name__}: {e}", file=sys.stderr)
+    sys.exit(1)
 PYEOF
     then
         log "RCP firmware verified."
@@ -318,55 +360,163 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
-# 8. Flash RCP firmware onto ESP32-C6 (optional — prompted on verify failure)
+# 8. Build ot_rcp from ESP-IDF source and flash (full: boot+PT+app).
+#    The ot_rcp example lives in ESP-IDF itself (examples/openthread/ot_rcp),
+#    not in esp-thread-br. ESP-IDF is cloned to cache/esp-idf if not present.
+#    IDF_PATH overrides the default cache/esp-idf location.
 # ---------------------------------------------------------------------------
-flash_rcp() {
+build_and_flash_rcp() {
     local port="$1"
-    local firmware=""
+    local force_flash="${2:-0}"   # 1 = flash unconditionally (ignore sha256 match)
+    local cached_bin="${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin"
 
-    if [[ -n "${RCP_FIRMWARE_PATH:-}" ]]; then
-        [[ -f "$RCP_FIRMWARE_PATH" ]] || die "RCP_FIRMWARE_PATH not found: $RCP_FIRMWARE_PATH"
-        firmware="$RCP_FIRMWARE_PATH"
-        log "Using local firmware: $firmware"
-    elif [[ -n "${RCP_FIRMWARE_URL:-}" ]]; then
-        local fw_cache="${SCRIPT_DIR}/cache/esp32/rcp/rcp-firmware-cache.bin"
-        mkdir -p "$(dirname "$fw_cache")"
-        if [[ ! -f "$fw_cache" ]]; then
-            log "Downloading RCP firmware from: $RCP_FIRMWARE_URL"
-            curl -L --progress-bar -o "$fw_cache" "$RCP_FIRMWARE_URL"
-        else
-            log "Using cached firmware: $fw_cache"
-        fi
-        firmware="$fw_cache"
+    # ------------------------------------------------------------------
+    # 1. Ensure ESP-IDF is available; track whether it changed.
+    #    Priority: idf.py in PATH > IDF_PATH env var > cache/esp-idf clone.
+    # ------------------------------------------------------------------
+    local _idf_path=""
+    local _src_changed=0
+
+    # Always use the locally managed clone in cache/esp-idf.
+    # IDF_PATH / idf.py in PATH are ignored — they may point to unrelated or
+    # stale installs and create hard-to-debug mismatches with the build config
+    # written here (sdkconfig.defaults.otbrstack).
+    _idf_path="${SCRIPT_DIR}/cache/esp-idf"
+    if [[ ! -d "$_idf_path" ]]; then
+        log "Cloning ESP-IDF into cache/esp-idf ..."
+        git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/espressif/esp-idf.git "$_idf_path"
+        "${_idf_path}/install.sh" esp32c6
+        _src_changed=1
     else
-        warn "No firmware source configured — cannot flash."
-        warn "Set one of these in your env file:"
-        warn "  RCP_FIRMWARE_PATH=/path/to/esp_ot_rcp.bin"
-        warn "  RCP_FIRMWARE_URL=https://example.com/esp_ot_rcp.bin"
-        return 1
+        local _idf_hash_before
+        _idf_hash_before=$(git -C "$_idf_path" rev-parse HEAD)
+        log "Updating ESP-IDF ..."
+        git -C "$_idf_path" fetch --depth 1 origin
+        git -C "$_idf_path" reset --hard origin/HEAD
+        git -C "$_idf_path" submodule update --init --recursive
+        "${_idf_path}/install.sh" esp32c6
+        local _idf_hash_after
+        _idf_hash_after=$(git -C "$_idf_path" rev-parse HEAD)
+        if [[ "$_idf_hash_before" != "$_idf_hash_after" ]]; then
+            log "ESP-IDF updated: ${_idf_hash_before:0:8} → ${_idf_hash_after:0:8}"
+            _src_changed=1
+        else
+            log "ESP-IDF already at latest (${_idf_hash_after:0:8})."
+        fi
     fi
 
-    local esptool="" esptool_venv="${SCRIPT_DIR}/artifacts/esptool-venv"
-    for _cmd in esptool.py esptool; do
-        command -v "$_cmd" &>/dev/null && esptool="$_cmd" && break
-    done
-    unset _cmd
-    if [[ -z "$esptool" ]] && [[ -x "${esptool_venv}/bin/esptool.py" ]]; then
-        esptool="${esptool_venv}/bin/esptool.py"
-    fi
-    if [[ -z "$esptool" ]]; then
-        log "esptool not found — installing into venv ..."
-        python3 -m venv "${esptool_venv}"
-        "${esptool_venv}/bin/pip" install --quiet esptool
-        esptool="${esptool_venv}/bin/esptool.py"
+    local ot_rcp_dir="${_idf_path}/examples/openthread/ot_rcp"
+
+    [[ -d "$ot_rcp_dir" ]] \
+        || die "ot_rcp example not found at: $ot_rcp_dir"
+
+    # ------------------------------------------------------------------
+    # 2. Write required sdkconfig overrides.
+    #    Track the content hash: if our overrides changed since the last
+    #    build, delete the existing sdkconfig so idf.py set-target
+    #    regenerates it from scratch.  Without this, set-target is a no-op
+    #    when the target is already esp32c6, and our overrides are silently
+    #    ignored (SDKCONFIG_DEFAULTS only applies when sdkconfig is absent).
+    # ------------------------------------------------------------------
+    local _defaults_file="${ot_rcp_dir}/sdkconfig.defaults.otbrstack"
+    local _defaults_hash_file="${ot_rcp_dir}/sdkconfig.defaults.otbrstack.sha256"
+    cat > "$_defaults_file" <<'SDKEOF'
+# Required for ESP32-C6 USB JTAG RCP (generated by otbrstack)
+#
+# ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG must be enabled first —
+# OPENTHREAD_RCP_USB_SERIAL_JTAG has a hard Kconfig dependency on it.
+# Without this, the USB JTAG RCP option is silently ignored and the
+# firmware falls back to UART for Spinel (no response on /dev/ttyACM0).
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y
+CONFIG_OPENTHREAD_RADIO=y
+CONFIG_OPENTHREAD_RADIO_NATIVE=y
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=n
+SDKEOF
+    local _new_hash
+    _new_hash=$(sha256sum "$_defaults_file" | awk '{print $1}')
+    local _old_hash=""
+    [[ -f "$_defaults_hash_file" ]] && _old_hash=$(cat "$_defaults_hash_file")
+    if [[ "$_new_hash" != "$_old_hash" ]]; then
+        log "sdkconfig overrides changed — forcing clean rebuild."
+        rm -f "${ot_rcp_dir}/sdkconfig"
+        _src_changed=1
     fi
 
-    local flash_addr="${RCP_FLASH_ADDR:-0x10000}"
-    log "Flashing $firmware → $port at $flash_addr ..."
-    "$esptool" --chip esp32c6 --port "$port" --baud 460800 \
-        write_flash "$flash_addr" "$firmware"
-    log "Flash complete — waiting for USB re-enumeration ..."
-    sleep 8
+    # force_flash also means: rebuild clean so the firmware we flash is
+    # guaranteed to match our current sdkconfig.defaults.otbrstack.
+    if [[ "$force_flash" -eq 1 && "$_src_changed" -eq 0 ]]; then
+        log "Force-flash requested — deleting stale sdkconfig and rebuilding."
+        rm -f "${ot_rcp_dir}/sdkconfig"
+        _src_changed=1
+    fi
+
+    # ------------------------------------------------------------------
+    # 3. Build only if source changed or no prior build exists.
+    # ------------------------------------------------------------------
+    local _built="${ot_rcp_dir}/build/esp_ot_rcp.bin"
+    if [[ "$_src_changed" -eq 1 || ! -f "$_built" ]]; then
+        log "Building ot_rcp for esp32c6 ..."
+        (
+            set -euo pipefail
+            source "${_idf_path}/export.sh"
+            set -euo pipefail
+            cd "$ot_rcp_dir"
+            export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.otbrstack"
+            idf.py set-target esp32c6
+            idf.py build
+        )
+        echo "$_new_hash" > "$_defaults_hash_file"
+    else
+        log "Source unchanged — skipping rebuild."
+    fi
+
+    [[ -f "$_built" ]] || die "Build failed — ${_built} not found."
+
+    # ------------------------------------------------------------------
+    # 4. Flash decision.
+    #    The cached copy reflects what was last flashed to a device.
+    #    sha256 match means the build hasn't changed, NOT that this specific
+    #    device has the firmware.  force_flash=1 bypasses the check entirely
+    #    (used when Spinel already failed and the user requested a flash).
+    # ------------------------------------------------------------------
+    local _do_flash=0
+    if [[ "$force_flash" -eq 1 ]]; then
+        log "Forcing flash (Spinel probe failed — flashing unconditionally)."
+        _do_flash=1
+    elif [[ ! -f "$cached_bin" ]]; then
+        _do_flash=1
+    else
+        local _sum_built _sum_cached
+        _sum_built=$(sha256sum "$_built" | awk '{print $1}')
+        _sum_cached=$(sha256sum "$cached_bin" | awk '{print $1}')
+        if [[ "$_sum_built" != "$_sum_cached" ]]; then
+            log "Firmware changed — reflashing device."
+            _do_flash=1
+        else
+            log "Firmware up to date — skipping flash."
+        fi
+    fi
+
+    if [[ "$_do_flash" -eq 1 ]]; then
+        log "Flashing $port (bootloader + partition table + app) ..."
+        (
+            set -euo pipefail
+            source "${_idf_path}/export.sh"
+            set -euo pipefail
+            cd "$ot_rcp_dir"
+            idf.py -p "$port" flash
+        )
+        mkdir -p "${SCRIPT_DIR}/cache/esp32/rcp"
+        cp "$_built" "$cached_bin"
+        log "Flash complete — waiting for USB re-enumeration ..."
+        sleep 8
+    fi
+}
+
+flash_rcp() {
+    build_and_flash_rcp "$1" 1   # always force: sha256 match ≠ device has firmware
 }
 
 # ---------------------------------------------------------------------------
@@ -620,10 +770,10 @@ main() {
 
     maybe_stop_otbr
 
-    if [[ "$THREAD_DEVICE_TYPE" == "esp32c6" ]]; then
-        if [[ "$OTBR_SNAP_STOPPED" == "skip" ]]; then
-            log "Skipping spinel firmware check (snap still running)."
-        else
+    if [[ "$OTBR_SNAP_STOPPED" == "skip" ]]; then
+        log "Skipping spinel firmware check (snap still running)."
+    else
+        if [[ "$THREAD_DEVICE_TYPE" == "esp32c6" ]]; then
             if [[ "$OTBR_SNAP_STOPPED" == "true" ]]; then
                 reload_rcp_device "$THREAD_DEVICE_PORT"
                 log "Re-detecting Thread device after USB reset..."
@@ -642,15 +792,31 @@ main() {
                     [[ -n "$THREAD_DEVICE_PORT" ]] \
                         || die "Thread device not found after flashing."
                     log "Found $THREAD_DEVICE_TYPE at: $THREAD_DEVICE_PORT"
-                    verify_rcp "$THREAD_DEVICE_PORT" \
-                        || die "Still no spinel response after flashing. Check firmware build config."
+                    local _flash_ok=0
+                    for _attempt in 1 2 3; do
+                        if verify_rcp "$THREAD_DEVICE_PORT"; then
+                            _flash_ok=1; break
+                        fi
+                        warn "Spinel probe attempt $_attempt/3 failed — retrying in 5s ..."
+                        sleep 5
+                    done
+                    if [[ "$_flash_ok" -eq 0 ]]; then
+                        warn "Still no spinel response after flashing."
+                        warn "Try: unplug the ESP32-C6 USB cable, plug it back in, then re-run."
+                        warn "If the problem persists, verify the USB JTAG interface is functional:"
+                        warn "  idf.py -p $THREAD_DEVICE_PORT monitor"
+                        die "Flashing failed — RCP firmware not responding to Spinel."
+                    fi
                 else
                     die "No spinel response from $THREAD_DEVICE_PORT. Flash RCP firmware and re-run."
                 fi
             fi
+        else
+            if ! verify_rcp "$THREAD_DEVICE_PORT"; then
+                die "No Spinel response from $THREAD_DEVICE_TYPE on $THREAD_DEVICE_PORT." \
+                    "Flash Thread RCP firmware onto the dongle and re-run."
+            fi
         fi
-    else
-        log "Skipping spinel verification for $THREAD_DEVICE_TYPE device."
     fi
     configure_otbr "$THREAD_DEVICE_PORT"
     ensure_snap_connections
