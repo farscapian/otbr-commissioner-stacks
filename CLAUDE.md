@@ -51,9 +51,7 @@ The env file is sourced automatically — no `export` or `sudo -E` needed.
 | `THREAD_DATASET_TLV` | all | Thread Active Operational Dataset (hex). Required. |
 | `SSH_PUBKEY` | flash, incus | SSH public key to inject into VM/image |
 | `SSH_MGMT_CIDRS` | flash | Space-separated IPs/CIDRs allowed SSH inbound via UFW (empty = allow all) |
-| `RCP_FIRMWARE_PATH` | flash | Path to ESP32-C6 RCP app binary (e.g. `cache/esp32/rcp/esp_ot_rcp.bin`) |
-| `RCP_FLASH_ADDR` | flash | Flash offset for firmware binary (default: `0x10000` for app-only binary) |
-| `RCP_FIRMWARE_URL` | flash | Download URL for RCP firmware (cached as `cache/esp32/rcp/rcp-firmware-cache.bin`) |
+| `IDF_PATH` | snap, incus | Path to existing ESP-IDF install (optional); if unset and `idf.py` not in PATH, ESP-IDF is auto-cloned to `cache/esp-idf` |
 | `SIM_RCP_BIN` | incus | Path to pre-built `ot-rcp` Linux simulation binary |
 | `SIM_RCP_URL` | incus | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
 | `DONGLE_VENDOR` | docker | USB vendor ID for Thread dongle (from `udevadm info`) |
@@ -98,7 +96,8 @@ Four deployment paths share the same `.env` file and `THREAD_DATASET_TLV` variab
 cache/
   ubuntu/server/    ← Ubuntu Server 26.04 arm64+raspi .img.xz and .img (otbrstack flash)
   snap/             ← openthread-border-router .snap + .assert (all provisioners)
-  esp32/rcp/        ← ESP32-C6 RCP firmware binary (user-placed or URL-downloaded)
+  esp32/rcp/        ← ESP32-C6 RCP app binary (built from esp-thread-br source)
+  esp-idf/          ← shallow clone of espressif/esp-idf (auto-cloned if IDF_PATH unset); ot_rcp example lives at examples/openthread/ot_rcp inside this clone
   ot-rcp-sim/       ← ot-rcp simulation binary (otbrstack vm)
 
 artifacts/
@@ -128,32 +127,22 @@ otbrstack vm x64 --reprovision           # delete and reprovision
 
 ## RCP firmware flashing
 
-When the ESP32-C6 is detected but has no Spinel response, the provisioner prompts to flash firmware.
+When an ESP32-C6 is detected, the provisioner always builds from source using the `ot_rcp` example in [esp-thread-br](https://github.com/espressif/esp-thread-br). All three binaries (bootloader + partition table + app) are flashed via `idf.py flash` — no pre-built binaries required.
 
-### ESP32-C6 build configuration (verified)
+### How it works
 
-The `ot_rcp` example in ESP-IDF should be built with these settings (`menuconfig` / `sdkconfig`):
-- `CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y` — use the built-in USB JTAG peripheral (not UART pins). The device appears as `/dev/ttyACM0`.
-- `CONFIG_OPENTHREAD_RADIO=y` + `CONFIG_OPENTHREAD_RADIO_NATIVE=y` — RCP mode, native IEEE 802.15.4 radio.
-- `CONFIG_ESP_COEX_SW_COEXIST_ENABLE=n` — disable WiFi/BT coexistence (RCP only).
+On every run the provisioner:
 
-The standard ESP-IDF `idf.py build` produces **three separate binaries** (not a merged image):
-- `bootloader/bootloader.bin` → flash at `0x0`
-- `partition_table/partition-table.bin` → flash at `0x8000`
-- `esp_ot_rcp.bin` (the app) → flash at `0x10000`
+1. **Updates ESP-IDF** — clones to `cache/esp-idf/` on first run, then `git fetch --depth 1` + `install.sh esp32c6` on subsequent runs. Skipped if `idf.py` is already in PATH or `IDF_PATH` points to an existing install.
+2. **Updates esp-thread-br** — clones `cache/esp-thread-br/` on first run, then pulls latest (`git fetch --depth 1` + `reset --hard origin/HEAD` + submodule update). Tracks the HEAD hash before and after.
+3. **Rebuilds** only if the esp-thread-br HEAD changed or no prior build artifact exists. Uses `sdkconfig.defaults.otbrstack` with:
+   - `CONFIG_OPENTHREAD_RCP_USB_SERIAL_JTAG=y` — USB JTAG peripheral (`/dev/ttyACM0`)
+   - `CONFIG_OPENTHREAD_RADIO=y` + `CONFIG_OPENTHREAD_RADIO_NATIVE=y` — RCP mode
+   - `CONFIG_ESP_COEX_SW_COEXIST_ENABLE=n` — disable WiFi/BT coexistence
+4. **Flashes** only if the freshly built binary differs (sha256) from `cache/esp32/rcp/esp_ot_rcp.bin` (the last-flashed copy). If identical, the connected device is already up to date and flash is skipped.
+5. On flash, updates `cache/esp32/rcp/esp_ot_rcp.bin` to reflect what is now on the device.
 
-For a **fresh device**, use `idf.py flash` directly — it handles all three automatically. For a device that already has the correct bootloader/partition table, copy the app binary:
-
-```bash
-cp .../build/esp_ot_rcp.bin cache/esp32/rcp/
-# then in .env:
-RCP_FIRMWARE_PATH=cache/esp32/rcp/esp_ot_rcp.bin
-RCP_FLASH_ADDR=0x10000
-```
-
-The baud rate `460800` in the Spinel URL is conventional — USB CDC-ACM (`/dev/ttyACM0`) doesn't use host-side baud rates internally (USB bulk transfers are not baud-rate-limited). The setting is harmless and expected by the OTBR snap.
-
-**Note:** esp-thread-br GitHub releases publish no binary assets — firmware must be built from source. Build instructions: https://github.com/espressif/esp-thread-br/tree/main/examples/ot_rcp
+The baud rate `460800` in the Spinel URL is conventional — USB CDC-ACM doesn't use host-side baud rates internally. The setting is harmless and expected by the OTBR snap.
 
 ## Key constraints
 
