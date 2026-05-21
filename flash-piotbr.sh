@@ -277,6 +277,32 @@ trap cleanup EXIT
 sudo mount -o "uid=$(id -u),gid=$(id -g)" "$BOOT_PART" "$MOUNT_DIR"
 info "Mounted $BOOT_PART at $MOUNT_DIR"
 
+# ---------------------------------------------------------------------------
+# 7.5 Patch cmdline.txt — inject cfg80211 regulatory domain kernel parameter.
+#
+#     modprobe.d/cfg80211.conf and cloud-init write_files run AFTER the kernel
+#     has already loaded cfg80211/brcmfmac (~14 s into first boot).  The only
+#     way to guarantee the regdom is set before the very first channel scan is
+#     to add it to the kernel command line, which is evaluated at module load
+#     time via the built-in regulatory database path.
+#
+#     If the param is already present (e.g. reflash), skip the edit.
+# ---------------------------------------------------------------------------
+_CMDLINE_FILE="${MOUNT_DIR}/cmdline.txt"
+if [[ -f "$_CMDLINE_FILE" ]]; then
+    _CMDLINE=$(cat "$_CMDLINE_FILE")
+    if [[ "$_CMDLINE" != *cfg80211.ieee80211_regdom=* ]]; then
+        printf '%s cfg80211.ieee80211_regdom=US\n' "${_CMDLINE%$'\n'}" \
+            > "$_CMDLINE_FILE"
+        info "Patched cmdline.txt: added cfg80211.ieee80211_regdom=US"
+    else
+        info "cmdline.txt already has cfg80211.ieee80211_regdom — skipped"
+    fi
+else
+    warn "cmdline.txt not found in system-boot — regulatory param not added"
+fi
+unset _CMDLINE_FILE _CMDLINE
+
 # Ubuntu Server NoCloud datasource reads user-data/meta-data from the
 # root of the system-boot partition, not a subdirectory.
 CI_DIR="${MOUNT_DIR}"
@@ -341,13 +367,6 @@ cat > "${CI_DIR}/user-data" <<USERDATA
 
 ${USERS_SECTION}
 
-# cloud-init installs these before runcmd, with built-in network readiness
-# and retry — more reliable than apt-get inside runcmd which runs before DHCP.
-package_update: true
-packages:
-  - avahi-daemon   # _meshcop._udp mDNS advertisement for Home Assistant discovery
-  - iw             # wireless regulatory domain (iw reg set US)
-
 # --------------------------------------------------------------------------
 # 9.1 File payloads
 # --------------------------------------------------------------------------
@@ -393,6 +412,28 @@ ${NETPLAN_WIFIS}
     permissions: '0644'
     content: |
       options cfg80211 ieee80211_regdom=US
+
+  # Disable brcmfmac background roaming scans. On BCM4345/6 (Pi 4B) firmware
+  # 7.45.265, the scan loop rejects 5 GHz channels as out-of-regulatory and
+  # then crashes at epc 0x000089d8. roamoff=1 prevents the scan loop entirely.
+  - path: /etc/modprobe.d/brcmfmac.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      options brcmfmac roamoff=1
+
+  # Apply regulatory domain and disable power save as soon as wlan* appears.
+  # udev fires at driver init (~14 s), well before runcmd (~35 s), so the
+  # regulatory is in effect before brcmfmac begins channel probing.
+  # Both global (iw reg set) and per-device (iw dev set country) are needed:
+  # brcmfmac may ignore the global hint if WIPHY_FLAG_SELF_MANAGED_REG is set.
+  - path: /etc/udev/rules.d/99-wifi-power.rules
+    owner: root:root
+    permissions: '0644'
+    content: |
+      ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw reg set US"
+      ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set country US"
+      ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set power_save off"
 
   # 9.1.3 OTBR interface-watcher — systemd service that reacts to
   #        networkd interface state changes and reconfigures OTBR.
@@ -526,9 +567,12 @@ ${NETPLAN_WIFIS}
       """Verify an OpenThread RCP is attached by sending a Spinel version query
       and checking for a valid HDLC response. No external packages required.
       Usage: otbr-verify-rcp.py <port> [baudrate]"""
-      import sys, os, time, struct, tty, select, fcntl
+      import sys, os, time, struct, tty, select, fcntl, termios
 
       HDLC_FLAG = 0x7E
+      TIOCMBIC  = 0x5417  # clear modem control bits (deassert)
+      TIOCM_DTR = 0x002
+      TIOCM_RTS = 0x004
 
       def fcs16(data):
           crc = 0xFFFF
@@ -552,26 +596,30 @@ ${NETPLAN_WIFIS}
 
       port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyACM0'
 
-      frame = hdlc_encode(bytes([0x80, 0x02, 0x02]))  # GET PROP_NCP_VERSION
+      # TID=1 in header (0x81): device sends a response.
+      # TID=0 (0x80) means unsolicited/no-reply — device will silently ignore it.
+      frame = hdlc_encode(bytes([0x81, 0x02, 0x02]))  # GET PROP_NCP_VERSION, TID=1
 
       try:
           fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
       except OSError as e:
           print(f'ERROR: cannot open {port}: {e}', file=sys.stderr); sys.exit(1)
 
-      # Assert DTR — required by ESP32-C6 USB Serial/JTAG to enable its TX path.
-      # tty.setraw() disables canonical mode so the kernel delivers bytes immediately
-      # rather than buffering until a newline (Spinel frames never contain 0x0A).
-      # Baud rate is intentionally not changed: setting it sends SET_LINE_CODING with
-      # a new speed, which resets the ESP32-C6 serial bridge. setraw() alone also
-      # sends SET_LINE_CODING but with the same c_cflag values — the device ignores it.
-      fcntl.ioctl(fd, 0x5416, struct.pack('I', 0x0002))  # TIOCMBIS, TIOCM_DTR
+      # Opening the port causes the kernel CDC-ACM driver to send
+      # SET_CONTROL_LINE_STATE(DTR=1, RTS=1), which triggers the ESP32-C6
+      # USB Serial/JTAG hardware auto-reset. Deassert both lines immediately,
+      # then wait for the device to finish rebooting (~4 s) before probing.
+      fcntl.ioctl(fd, TIOCMBIC, struct.pack('I', TIOCM_DTR | TIOCM_RTS))
       tty.setraw(fd)
+      os.set_blocking(fd, True)
+      time.sleep(4)
+      termios.tcflush(fd, termios.TCIFLUSH)  # discard boot ROM / IDF startup output
+
       os.write(fd, frame)
-      time.sleep(1.0)
+      time.sleep(0.5)
 
       try:
-          ready, _, _ = select.select([fd], [], [], 3.0)
+          ready, _, _ = select.select([fd], [], [], 4.0)
           resp = os.read(fd, 256) if ready else b''
       except OSError:
           resp = b''
@@ -586,7 +634,97 @@ ${NETPLAN_WIFIS}
             f'({len(resp)} bytes: {resp.hex() or "empty"})', file=sys.stderr)
       sys.exit(1)
 
-  # 9.1.6 First-boot OTBR configuration script (called from runcmd)
+  # 9.1.6 Per-boot RCP radio auto-detection script.
+  #        Probes every serial device with a Spinel version query and
+  #        configures the OTBR snap with the first device that responds.
+  #        Runs on every boot via otbr-radio-detect.service — the snap
+  #        never uses a previously cached device path.
+  - path: /usr/local/sbin/otbr-radio-detect.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Probe serial devices, configure OTBR snap radio-url.
+      # Baked-in at flash time: BAUD=${BAUD}  SKIP=${SKIP_RCP_VERIFY:-0}
+      set -euo pipefail
+      LOG=/var/log/otbr-firstboot.log
+      SNAP=openthread-border-router
+
+      log() { printf '[radio-detect] %s\n' "\$*" | tee -a "\$LOG"; }
+      log "=== Radio detection \$(date) ==="
+
+      # Stop ModemManager so it releases the device before probing.
+      # It is already masked (never restarts); stopping here keeps the
+      # device enumerated — the sysfs-reset approach caused cdc_acm to fail.
+      systemctl stop ModemManager 2>/dev/null || true
+      sleep 1
+
+      # Wait up to 60 s for any serial device to enumerate.
+      RCP=""
+      for _i in \$(seq 1 30); do
+        for _dev in /dev/ttyACM* /dev/ttyUSB*; do
+          [[ -c "\$_dev" ]] && RCP="\$_dev" && break 2
+        done
+        log "Waiting for serial device... \$((_i*2))s"
+        sleep 2
+      done
+      if [[ -z "\$RCP" ]]; then log "ERROR: no serial device found after 60 s"; exit 1; fi
+
+      if [[ "${SKIP_RCP_VERIFY:-0}" -eq 1 ]]; then
+        log "SKIP_RCP_VERIFY=1 — using first device: \$RCP"
+        FOUND="\$RCP"
+      else
+        # Probe each device; use first that responds to Spinel.
+        FOUND=""
+        for _dev in /dev/ttyACM* /dev/ttyUSB*; do
+          [[ -c "\$_dev" ]] || continue
+          log "Probing \$_dev ..."
+          if python3 /usr/local/sbin/otbr-verify-rcp.py "\$_dev" "${BAUD}"; then
+            FOUND="\$_dev"; break
+          fi
+          log "\$_dev: no Spinel response"
+        done
+        if [[ -z "\$FOUND" ]]; then log "ERROR: no Spinel-responding device found"; exit 1; fi
+      fi
+
+      log "RCP detected: \$FOUND — configuring snap"
+      snap set "\$SNAP" \
+        radio-url="spinel+hdlc+uart://\${FOUND}?uart-baudrate=${BAUD}" \
+        otbr-radio-url="spinel+hdlc+uart://\${FOUND}?uart-baudrate=${BAUD}"
+      log "Radio URL set: \$FOUND"
+
+  # 9.1.7 Systemd unit: run otbr-radio-detect.sh on every boot,
+  #        before the OTBR snap agent starts.
+  - path: /etc/systemd/system/otbr-radio-detect.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=OTBR Radio Auto-Detect (per-boot Spinel probe)
+      # Only run once the snap is installed (skip on very first boot;
+      # otbr-firstboot.sh calls the script directly that time).
+      ConditionPathExists=/snap/openthread-border-router/current
+      ConditionPathExists=/usr/local/sbin/otbr-verify-rcp.py
+      After=sysinit.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/otbr-radio-detect.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # 9.1.8 Drop-in: make the OTBR snap agent wait for radio detection.
+  - path: /etc/systemd/system/snap.openthread-border-router.otbr-agent.service.d/10-radio-detect.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      After=otbr-radio-detect.service
+      Wants=otbr-radio-detect.service
+
+  # 9.1.9 First-boot OTBR configuration script (called from runcmd)
   - path: /usr/local/sbin/otbr-firstboot.sh
     owner: root:root
     permissions: '0755'
@@ -599,47 +737,6 @@ ${NETPLAN_WIFIS}
       exec >> "\$LOG" 2>&1
 
       echo "=== OTBR first-boot \$(date) ==="
-
-      # -- Wait for RCP device to enumerate (USB can be slow at boot) ----------
-      echo "Waiting for RCP serial device ..."
-      RCP=""
-      for _i in \$(seq 1 30); do
-        RCP=\$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1 || true)
-        [[ -n "\$RCP" ]] && break
-        sleep 2
-      done
-      if [[ -z "\$RCP" ]]; then
-        echo "ERROR: no RCP serial device found after 60s"; exit 1
-      fi
-      echo "RCP device: \$RCP"
-
-      # -- Stop ModemManager so it releases the device before we probe ---------
-      # MM is already masked (won't restart). Stopping it here rather than in
-      # runcmd keeps the device enumerated — the authorized-sysfs reset approach
-      # caused cdc_acm to fail to rebind, making the device disappear entirely.
-      systemctl stop ModemManager 2>/dev/null || true
-      sleep 2
-
-      # -- Verify RCP firmware (retry to survive MM release delay) ------------
-      if [[ "${SKIP_RCP_VERIFY:-0}" -eq 1 ]]; then
-        echo "SKIP_RCP_VERIFY=1 — skipping RCP firmware check."
-      else
-        echo "Verifying RCP firmware on \$RCP ..."
-        _rcp_ok=0
-        for _attempt in 1 2 3; do
-          if python3 /usr/local/sbin/otbr-verify-rcp.py "\$RCP" "${BAUD}"; then
-            _rcp_ok=1; break
-          fi
-          echo "RCP probe attempt \$_attempt failed; retrying in 5s ..."
-          sleep 5
-        done
-        if [[ \$_rcp_ok -eq 0 ]]; then
-          echo "ERROR: RCP firmware check failed on \$RCP after 3 attempts."
-          echo "       Ensure the ESP32-C6 is flashed with OpenThread RCP firmware."
-          exit 1
-        fi
-        echo "RCP firmware OK."
-      fi
 
       # -- Wait for snapd to be fully seeded ---------------------------------
       snap wait system seed.loaded
@@ -657,6 +754,14 @@ ${NETPLAN_WIFIS}
         sleep 5
       done
 
+      # -- Install/upgrade packages (DNS is guaranteed up at this point) -------
+      apt-get update -q
+      apt-get install -y avahi-daemon iw
+      # Upgrade linux-firmware to get the latest BCM4345/6 CLM blob, which
+      # defines allowed 5 GHz channels. The version shipped in the base image
+      # is often months stale and causes reason -52 channel rejections.
+      apt-get install -y --only-upgrade linux-firmware || true
+
       # -- Install snap from store (retry on transient network errors) --------
       for _i in \$(seq 1 5); do
         snap install "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} && break
@@ -673,6 +778,9 @@ ${NETPLAN_WIFIS}
       # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
       snap list chip-tool &>/dev/null || snap install chip-tool
 
+      # -- Detect RCP radio via Spinel probe (sets snap radio-url) ----------
+      /usr/local/sbin/otbr-radio-detect.sh
+
       # -- Determine backbone interface --------------------------------------
       INFRA=wlan0
       if ip link show eth0 2>/dev/null | grep -q 'LOWER_UP'; then
@@ -680,11 +788,9 @@ ${NETPLAN_WIFIS}
       fi
       echo "Backbone interface: \$INFRA"
 
-      # -- Configure snap ----------------------------------------------------
+      # -- Configure snap (radio-url already set by otbr-radio-detect.sh) ---
       snap set "\$SNAP" \
         infra-if="\$INFRA" \
-        radio-url="spinel+hdlc+uart://\${RCP}?uart-baudrate=${BAUD}" \
-        otbr-radio-url="spinel+hdlc+uart://\${RCP}?uart-baudrate=${BAUD}" \
         thread-if=wpan0 \
         autostart=true
 
@@ -728,6 +834,15 @@ ${NETPLAN_WIFIS}
 
       echo "OTBR first-boot complete."
 
+      # -- Apply pending boot assets (Ubuntu kernel/firmware updates) --------
+      # piboot-try uses Ubuntu's tryboot mechanism: if untested assets are in
+      # /boot/firmware/new, a reboot is needed to test them. Do it now rather
+      # than leaving the banner on every login.
+      if [[ -d /boot/firmware/new ]] && command -v piboot-try &>/dev/null; then
+        echo "Pending boot assets detected — rebooting to apply (piboot-try)."
+        piboot-try --reboot
+      fi
+
 # --------------------------------------------------------------------------
 # 9.3 runcmd — executes after write_files and snap modules
 # --------------------------------------------------------------------------
@@ -736,12 +851,15 @@ runcmd:
   # This also ensures systemd-resolved gets DNS servers from our DHCP config.
   - netplan apply || true
 
-  # Apply wireless regulatory domain immediately
+  # Apply wireless regulatory domain if iw is already installed (subsequent
+  # boots). On first boot iw is not yet installed; modprobe.d cfg80211.conf
+  # handles the initial regdom. firstboot.sh installs iw with working DNS.
   - iw reg set US || true
 
   # Enable and start the interface watcher
   - systemctl daemon-reload
   - systemctl enable otbr-ifwatcher.service
+  - systemctl enable otbr-radio-detect.service
 
   # Reload udev rules so the ESP32 ModemManager-ignore rule (written above by
   # write_files) takes effect for devices already enumerated at boot.
@@ -749,8 +867,8 @@ runcmd:
   - udevadm trigger --subsystem-match=usb
   # Mask ModemManager permanently — this OTBR device never needs it.
   # Masking (not just stopping) prevents systemd from restarting it.
-  # The actual stop happens inside otbr-firstboot.sh immediately before the
-  # Spinel probe, so timing is controlled and the device stays enumerated.
+  # The actual stop happens inside otbr-radio-detect.sh before each Spinel
+  # probe so the device stays enumerated on every boot.
   - systemctl mask ModemManager || true
 
   # Run the OTBR first-boot configurator (background so cloud-init doesn't block)
@@ -768,6 +886,57 @@ mkdir -p "$CI_ARTIFACT_DIR"
 cp "${CI_DIR}/meta-data" "${CI_ARTIFACT_DIR}/meta-data"
 cp "${CI_DIR}/user-data" "${CI_ARTIFACT_DIR}/user-data"
 info "cloud-init artifacts saved to ${CI_ARTIFACT_DIR}/"
+
+# ---------------------------------------------------------------------------
+# 9.5 Write critical kernel config directly to the root (writable) partition.
+#
+#     Problem: cloud-init write_files runs at ~30 s into first boot, but
+#     brcmfmac loads at ~14 s.  The modprobe.d and udev rules written by
+#     cloud-init arrive too late to affect the very first driver init.
+#
+#     Fix: write the same files directly to p2 (root filesystem) during the
+#     flash so they are present before the kernel boots for the first time.
+#     cloud-init will overwrite them on first boot with identical content.
+# ---------------------------------------------------------------------------
+_ROOT_PART=""
+for _sfx in "2" "p2"; do
+    _c="${TARGET_DEV}${_sfx}"
+    [[ -b "$_c" ]] && { _ROOT_PART="$_c"; break; }
+done
+
+if [[ -z "$_ROOT_PART" ]]; then
+    warn "Cannot locate root partition (p2) — brcmfmac config will apply from second boot via cloud-init."
+else
+    _ROOT_DIR=$(mktemp -d /tmp/uc-root-XXXXXX)
+    if sudo mount "$_ROOT_PART" "$_ROOT_DIR" 2>/dev/null; then
+        info "Mounted root partition $_ROOT_PART — writing kernel config..."
+        sudo mkdir -p \
+            "$_ROOT_DIR/etc/modprobe.d" \
+            "$_ROOT_DIR/etc/udev/rules.d"
+
+        sudo tee "$_ROOT_DIR/etc/modprobe.d/brcmfmac.conf" > /dev/null <<'BRCM'
+options brcmfmac roamoff=1
+BRCM
+
+        sudo tee "$_ROOT_DIR/etc/modprobe.d/cfg80211.conf" > /dev/null <<'CFG'
+options cfg80211 ieee80211_regdom=US
+CFG
+
+        sudo tee "$_ROOT_DIR/etc/udev/rules.d/99-wifi-power.rules" > /dev/null <<'UDEV'
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw reg set US"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set country US"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set power_save off"
+UDEV
+
+        sudo umount "$_ROOT_DIR"
+        rmdir "$_ROOT_DIR"
+        info "Kernel config written to root filesystem — active from first boot."
+    else
+        warn "Cannot mount root partition $_ROOT_PART — brcmfmac config will apply from second boot via cloud-init."
+        rmdir "$_ROOT_DIR"
+    fi
+    unset _ROOT_PART _ROOT_DIR _sfx _c
+fi
 
 # ---------------------------------------------------------------------------
 # 10. Unmount and finalise
@@ -812,7 +981,11 @@ info "   3. Configure OTBR with your Thread TLV"
 info "   4. Start OTBR as border router automatically"
 info "   5. Start the interface watcher (prefers eth0)"
 info ""
-info " SSH:  ssh ubuntu@<pi-ip>  (using key from SSH_PUBKEY)"
+if [[ -n "${_HOSTNAME_CLI:-}" ]]; then
+    info " SSH:  ssh ${OTBR_HOSTNAME}  (hostname from --hostname flag)"
+else
+    info " SSH:  ssh ubuntu@<pi-ip>  (or: ssh ${OTBR_HOSTNAME} if DNS/mDNS resolves)"
+fi
 info " Logs: /var/log/otbr-firstboot.log"
 info " Cloud-init: sudo cloud-init status --long"
 info "============================================================"
