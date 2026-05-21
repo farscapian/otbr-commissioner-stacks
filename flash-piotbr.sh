@@ -362,6 +362,10 @@ else
     warn "Set SSH_PUBKEY in your env file to enable passwordless SSH access."
 fi
 
+# Base64-encode the canonical probe script so it can be embedded in the
+# cloud-init YAML without escaping issues (cloud-init decodes it on the Pi).
+_VERIFY_RCP_B64=$(base64 -w 0 "${SCRIPT_DIR}/scripts/verify_rcp.py")
+
 cat > "${CI_DIR}/user-data" <<USERDATA
 #cloud-config
 
@@ -558,81 +562,13 @@ ${NETPLAN_WIFIS}
       [Install]
       WantedBy=multi-user.target
 
-  # 9.1.5 RCP firmware verification script (no external deps, raw HDLC probe)
+  # 9.1.5 RCP firmware verification script — base64-encoded from scripts/verify_rcp.py.
+  #        Uses pyserial when available; falls back to stdlib so no venv is needed.
   - path: /usr/local/sbin/otbr-verify-rcp.py
     owner: root:root
     permissions: '0755'
-    content: |
-      #!/usr/bin/env python3
-      """Verify an OpenThread RCP is attached by sending a Spinel version query
-      and checking for a valid HDLC response. No external packages required.
-      Usage: otbr-verify-rcp.py <port> [baudrate]"""
-      import sys, os, time, struct, tty, select, fcntl, termios
-
-      HDLC_FLAG = 0x7E
-      TIOCMBIC  = 0x5417  # clear modem control bits (deassert)
-      TIOCM_DTR = 0x002
-      TIOCM_RTS = 0x004
-
-      def fcs16(data):
-          crc = 0xFFFF
-          for b in data:
-              crc ^= b
-              for _ in range(8):
-                  crc = (crc >> 1) ^ 0x8408 if crc & 1 else crc >> 1
-          return crc ^ 0xFFFF
-
-      def hdlc_encode(payload):
-          fcs = fcs16(payload)
-          raw = payload + struct.pack('<H', fcs)
-          out = bytearray([HDLC_FLAG])
-          for b in raw:
-              if b in (0x7E, 0x7D):
-                  out += bytes([0x7D, b ^ 0x20])
-              else:
-                  out.append(b)
-          out.append(HDLC_FLAG)
-          return bytes(out)
-
-      port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyACM0'
-
-      # TID=1 in header (0x81): device sends a response.
-      # TID=0 (0x80) means unsolicited/no-reply — device will silently ignore it.
-      frame = hdlc_encode(bytes([0x81, 0x02, 0x02]))  # GET PROP_NCP_VERSION, TID=1
-
-      try:
-          fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-      except OSError as e:
-          print(f'ERROR: cannot open {port}: {e}', file=sys.stderr); sys.exit(1)
-
-      # Opening the port causes the kernel CDC-ACM driver to send
-      # SET_CONTROL_LINE_STATE(DTR=1, RTS=1), which triggers the ESP32-C6
-      # USB Serial/JTAG hardware auto-reset. Deassert both lines immediately,
-      # then wait for the device to finish rebooting (~4 s) before probing.
-      fcntl.ioctl(fd, TIOCMBIC, struct.pack('I', TIOCM_DTR | TIOCM_RTS))
-      tty.setraw(fd)
-      os.set_blocking(fd, True)
-      time.sleep(4)
-      termios.tcflush(fd, termios.TCIFLUSH)  # discard boot ROM / IDF startup output
-
-      os.write(fd, frame)
-      time.sleep(0.5)
-
-      try:
-          ready, _, _ = select.select([fd], [], [], 4.0)
-          resp = os.read(fd, 256) if ready else b''
-      except OSError:
-          resp = b''
-      finally:
-          os.close(fd)
-
-      if HDLC_FLAG in resp and len(resp) > 4:
-          print(f'RCP OK — {len(resp)}-byte HDLC response from {port}')
-          sys.exit(0)
-
-      print(f'ERROR: no HDLC response from {port} '
-            f'({len(resp)} bytes: {resp.hex() or "empty"})', file=sys.stderr)
-      sys.exit(1)
+    encoding: b64
+    content: ${_VERIFY_RCP_B64}
 
   # 9.1.6 Per-boot RCP radio auto-detection script.
   #        Probes every serial device with a Spinel version query and

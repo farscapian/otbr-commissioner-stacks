@@ -283,65 +283,11 @@ ensure_pyspinel_venv() {
     "$PYSPINEL_VENV/bin/pip" install --quiet pyspinel
 }
 
-# HDLC Spinel probe — sends PROP_VALUE_GET(PROP_NCP_VERSION) with TID=1 and
-# checks for a valid HDLC response. Uses pyserial so DTR/RTS can be explicitly
-# deasserted after port open; opening a CDC-ACM device triggers a kernel
-# SET_CONTROL_LINE_STATE(DTR=1) which resets the ESP32-C6, so we must wait
-# for the device to reboot before sending the Spinel frame.
+# Delegates to scripts/verify_rcp.py — the single canonical probe.
 _probe_rcp() {
     local port="$1"
     ensure_pyspinel_venv
-    "${PYSPINEL_VENV}/bin/python3" - "$port" << 'PYEOF'
-import sys, struct, time
-try:
-    import serial
-except ImportError as e:
-    print(f"ImportError: {e}", file=sys.stderr); sys.exit(2)
-port = sys.argv[1]
-HDLC_FLAG = 0x7E
-def fcs16(d):
-    c = 0xFFFF
-    for b in d:
-        c ^= b
-        for _ in range(8): c = (c >> 1) ^ 0x8408 if c & 1 else c >> 1
-    return c ^ 0xFFFF
-payload = bytes([0x81, 0x02, 0x02])  # TID=1: response expected; TID=0 (0x80) is unsolicited/no-reply
-raw = payload + struct.pack('<H', fcs16(payload))
-frame = bytearray([HDLC_FLAG])
-for b in raw:
-    if b in (0x7E, 0x7D): frame += bytes([0x7D, b ^ 0x20])
-    else: frame.append(b)
-frame.append(HDLC_FLAG)
-try:
-    ser = serial.Serial()
-    ser.port = port
-    ser.baudrate = 460800
-    ser.timeout = 4
-    ser.dsrdtr = False
-    ser.rtscts = False
-    ser.open()
-    # Opening the port via CDC-ACM causes the kernel to assert DTR, which
-    # triggers the ESP32-C6 USB Serial/JTAG hardware auto-reset. This is
-    # not configurable — deassert immediately and wait for the device to
-    # finish rebooting and the Spinel stack to initialize (~4s).
-    ser.dtr = False
-    ser.rts = False
-    ser.reset_input_buffer()
-    time.sleep(4)
-    ser.reset_input_buffer()
-    ser.write(bytes(frame))
-    time.sleep(0.5)
-    resp = ser.read(256)
-    ser.close()
-    if HDLC_FLAG in resp and len(resp) > 4:
-        sys.exit(0)
-    else:
-        print(f"No valid Spinel response ({len(resp)} bytes: {resp[:32].hex()})", file=sys.stderr)
-        sys.exit(1)
-except Exception as e:
-    print(f"Spinel probe error: {type(e).__name__}: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
+    "${PYSPINEL_VENV}/bin/python3" "${SCRIPT_DIR}/scripts/verify_rcp.py" "$port"
 }
 
 verify_rcp() {
