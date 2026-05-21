@@ -365,6 +365,7 @@ fi
 # Base64-encode the canonical probe script so it can be embedded in the
 # cloud-init YAML without escaping issues (cloud-init decodes it on the Pi).
 _VERIFY_RCP_B64=$(base64 -w 0 "${SCRIPT_DIR}/scripts/verify_rcp.py")
+_FLASH_RCP_B64=$(base64 -w 0 "${SCRIPT_DIR}/scripts/flash_rcp.sh")
 
 cat > "${CI_DIR}/user-data" <<USERDATA
 #cloud-config
@@ -570,95 +571,131 @@ ${NETPLAN_WIFIS}
     encoding: b64
     content: ${_VERIFY_RCP_B64}
 
-  # 9.1.6 Per-boot RCP radio auto-detection script.
-  #        Probes every serial device with a Spinel version query and
-  #        configures the OTBR snap with the first device that responds.
-  #        Runs on every boot via otbr-radio-detect.service — the snap
-  #        never uses a previously cached device path.
-  - path: /usr/local/sbin/otbr-radio-detect.sh
+  # 9.1.6 ESP32-C6 RCP flash script — embedded from scripts/flash_rcp.sh.
+  #        Clones/updates ESP-IDF, builds ot_rcp, and flashes only when the
+  #        firmware changes.  On the Pi, IDF lives at /opt/esp-idf.
+  - path: /usr/local/sbin/otbr-flash-rcp.sh
+    owner: root:root
+    permissions: '0755'
+    encoding: b64
+    content: ${_FLASH_RCP_B64}
+
+  # 9.1.7 Per-boot RCP orchestration script.
+  #        Waits for the ESP32-C6 to enumerate, calls otbr-flash-rcp.sh to
+  #        build/flash firmware if changed, then sets the snap radio-url.
+  #        Called directly by otbr-firstboot.sh on first boot; run as a
+  #        systemd service (otbr-rcp-update.service) on every subsequent boot.
+  - path: /usr/local/sbin/otbr-rcp-update.sh
     owner: root:root
     permissions: '0755'
     content: |
       #!/usr/bin/env bash
-      # Probe serial devices, configure OTBR snap radio-url.
-      # Baked-in at flash time: BAUD=${BAUD}  SKIP=${SKIP_RCP_VERIFY:-0}
+      # Build/flash ESP32-C6 RCP firmware; configure OTBR snap radio-url.
+      # Baked-in at flash time: BAUD=${BAUD}
       set -euo pipefail
       LOG=/var/log/otbr-firstboot.log
       SNAP=openthread-border-router
 
-      log() { printf '[radio-detect] %s\n' "\$*" | tee -a "\$LOG"; }
-      log "=== Radio detection \$(date) ==="
+      log() { printf '[rcp-update] %s\n' "\$*" | tee -a "\$LOG"; }
+      log "=== RCP update \$(date) ==="
 
-      # Stop ModemManager so it releases the device before probing.
-      # It is already masked (never restarts); stopping here keeps the
-      # device enumerated — the sysfs-reset approach caused cdc_acm to fail.
       systemctl stop ModemManager 2>/dev/null || true
       sleep 1
 
-      # Wait up to 60 s for any serial device to enumerate.
+      # Wait up to 60 s for an ESP32-C6 (idVendor=303a) on ttyACM*.
       RCP=""
       for _i in \$(seq 1 30); do
-        for _dev in /dev/ttyACM* /dev/ttyUSB*; do
-          [[ -c "\$_dev" ]] && RCP="\$_dev" && break 2
+        for _dev in /dev/ttyACM*; do
+          [[ -c "\$_dev" ]] || continue
+          _base=\$(basename "\$_dev")
+          _usb=\$(readlink -f "/sys/class/tty/\${_base}/device" 2>/dev/null) || continue
+          while [[ -n "\$_usb" && "\$_usb" != "/" && ! -f "\$_usb/idVendor" ]]; do
+            _usb=\$(dirname "\$_usb")
+          done
+          if [[ -f "\$_usb/idVendor" ]] && [[ "\$(cat "\$_usb/idVendor")" == "303a" ]]; then
+            RCP="\$_dev"; break 2
+          fi
         done
-        log "Waiting for serial device... \$((_i*2))s"
+        log "Waiting for ESP32-C6 (\${_i}/30)..."
         sleep 2
       done
-      if [[ -z "\$RCP" ]]; then log "ERROR: no serial device found after 60 s"; exit 1; fi
 
-      if [[ "${SKIP_RCP_VERIFY:-0}" -eq 1 ]]; then
-        log "SKIP_RCP_VERIFY=1 — using first device: \$RCP"
-        FOUND="\$RCP"
-      else
-        # Probe each device; use first that responds to Spinel.
-        FOUND=""
-        for _dev in /dev/ttyACM* /dev/ttyUSB*; do
-          [[ -c "\$_dev" ]] || continue
-          log "Probing \$_dev ..."
-          if python3 /usr/local/sbin/otbr-verify-rcp.py "\$_dev" "${BAUD}"; then
-            FOUND="\$_dev"; break
-          fi
-          log "\$_dev: no Spinel response"
-        done
-        if [[ -z "\$FOUND" ]]; then log "ERROR: no Spinel-responding device found"; exit 1; fi
+      if [[ -z "\$RCP" ]]; then
+        log "ERROR: no ESP32-C6 found after 60 s"; exit 1
       fi
+      log "ESP32-C6 detected: \$RCP"
 
-      log "RCP detected: \$FOUND — configuring snap"
+      mkdir -p /var/lib/otbr
+      IDF_DIR=/opt/esp-idf \
+      IDF_TOOLS_PATH=/opt/esp-idf-tools \
+      RCP_BIN_CACHE=/var/lib/otbr/esp_ot_rcp.bin \
+        /usr/local/sbin/otbr-flash-rcp.sh --port "\$RCP"
+
       snap set "\$SNAP" \
-        radio-url="spinel+hdlc+uart://\${FOUND}?uart-baudrate=${BAUD}" \
-        otbr-radio-url="spinel+hdlc+uart://\${FOUND}?uart-baudrate=${BAUD}"
-      log "Radio URL set: \$FOUND"
+        radio-url="spinel+hdlc+uart://\${RCP}?uart-baudrate=${BAUD}" \
+        otbr-radio-url="spinel+hdlc+uart://\${RCP}?uart-baudrate=${BAUD}"
+      log "Radio URL configured: \$RCP"
 
-  # 9.1.7 Systemd unit: run otbr-radio-detect.sh on every boot,
+  # 9.1.8 Systemd unit: run otbr-rcp-update.sh on every boot,
   #        before the OTBR snap agent starts.
-  - path: /etc/systemd/system/otbr-radio-detect.service
+  #        ConditionPathExists skips this on the very first boot (snap not yet
+  #        installed); otbr-firstboot.sh calls the script directly that time.
+  - path: /etc/systemd/system/otbr-rcp-update.service
     owner: root:root
     permissions: '0644'
     content: |
       [Unit]
-      Description=OTBR Radio Auto-Detect (per-boot Spinel probe)
-      # Only run once the snap is installed (skip on very first boot;
-      # otbr-firstboot.sh calls the script directly that time).
+      Description=OTBR ESP32-C6 RCP firmware update (build from ESP-IDF + flash)
       ConditionPathExists=/snap/openthread-border-router/current
-      ConditionPathExists=/usr/local/sbin/otbr-verify-rcp.py
       After=sysinit.target
+      Before=snap.openthread-border-router.otbr-agent.service
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      ExecStart=/usr/local/sbin/otbr-radio-detect.sh
+      ExecStart=/usr/local/sbin/otbr-rcp-update.sh
+      TimeoutStartSec=1800
+      StandardOutput=journal+console
+      StandardError=journal+console
 
       [Install]
       WantedBy=multi-user.target
 
-  # 9.1.8 Drop-in: make the OTBR snap agent wait for radio detection.
+  # 9.1.9 Drop-in: make the OTBR snap agent wait for RCP firmware update.
   - path: /etc/systemd/system/snap.openthread-border-router.otbr-agent.service.d/10-radio-detect.conf
     owner: root:root
     permissions: '0644'
     content: |
       [Unit]
-      After=otbr-radio-detect.service
-      Wants=otbr-radio-detect.service
+      After=otbr-rcp-update.service
+      Wants=otbr-rcp-update.service
+
+  # 9.1.10 Weekly reboot timer — triggers RCP firmware check via boot service.
+  - path: /etc/systemd/system/otbr-weekly-reboot.timer
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Weekly reboot to trigger OTBR RCP firmware update check
+
+      [Timer]
+      OnCalendar=weekly
+      Persistent=true
+      Unit=otbr-weekly-reboot.service
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/systemd/system/otbr-weekly-reboot.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Reboot to trigger OTBR RCP firmware update check
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/reboot
 
   # 9.1.9 First-boot OTBR configuration script (called from runcmd)
   - path: /usr/local/sbin/otbr-firstboot.sh
@@ -692,7 +729,7 @@ ${NETPLAN_WIFIS}
 
       # -- Install/upgrade packages (DNS is guaranteed up at this point) -------
       apt-get update -q
-      apt-get install -y avahi-daemon iw
+      apt-get install -y avahi-daemon iw git cmake ninja-build python3-venv python3-pip libusb-1.0-0
       # Upgrade linux-firmware to get the latest BCM4345/6 CLM blob, which
       # defines allowed 5 GHz channels. The version shipped in the base image
       # is often months stale and causes reason -52 channel rejections.
@@ -714,8 +751,9 @@ ${NETPLAN_WIFIS}
       # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
       snap list chip-tool &>/dev/null || snap install chip-tool
 
-      # -- Detect RCP radio via Spinel probe (sets snap radio-url) ----------
-      /usr/local/sbin/otbr-radio-detect.sh
+      # -- Update/flash RCP firmware; sets snap radio-url ------------------
+      mkdir -p /var/lib/otbr
+      /usr/local/sbin/otbr-rcp-update.sh
 
       # -- Determine backbone interface --------------------------------------
       INFRA=wlan0
@@ -724,7 +762,7 @@ ${NETPLAN_WIFIS}
       fi
       echo "Backbone interface: \$INFRA"
 
-      # -- Configure snap (radio-url already set by otbr-radio-detect.sh) ---
+      # -- Configure snap (radio-url already set by otbr-rcp-update.sh) ---
       snap set "\$SNAP" \
         infra-if="\$INFRA" \
         thread-if=wpan0 \
@@ -732,6 +770,9 @@ ${NETPLAN_WIFIS}
 
       # -- Start the snap service --------------------------------------------
       snap start --enable "\$SNAP"
+
+      # -- Start interface watcher for immediate eth0/wlan0 failover --------
+      systemctl start otbr-ifwatcher.service || true
 
       # -- Seed Thread dataset -----------------------------------------------
       # Wait up to 30 s for the agent socket to appear
@@ -795,7 +836,8 @@ runcmd:
   # Enable and start the interface watcher
   - systemctl daemon-reload
   - systemctl enable otbr-ifwatcher.service
-  - systemctl enable otbr-radio-detect.service
+  - systemctl enable otbr-rcp-update.service
+  - systemctl enable otbr-weekly-reboot.timer
 
   # Reload udev rules so the ESP32 ModemManager-ignore rule (written above by
   # write_files) takes effect for devices already enumerated at boot.
@@ -803,8 +845,7 @@ runcmd:
   - udevadm trigger --subsystem-match=usb
   # Mask ModemManager permanently — this OTBR device never needs it.
   # Masking (not just stopping) prevents systemd from restarting it.
-  # The actual stop happens inside otbr-radio-detect.sh before each Spinel
-  # probe so the device stays enumerated on every boot.
+  # The actual stop happens inside otbr-rcp-update.sh before each build/flash.
   - systemctl mask ModemManager || true
 
   # Run the OTBR first-boot configurator (background so cloud-init doesn't block)
