@@ -144,17 +144,27 @@ fi
 _built="${_ot_rcp_dir}/build/esp_ot_rcp.bin"
 
 if [[ "$_src_changed" -eq 1 || ! -f "$_built" ]]; then
-    log "Building ot_rcp for esp32c6 ..."
-    (
-        set -euo pipefail
-        export IDF_TOOLS_PATH
-        source "${IDF_DIR}/export.sh"
-        set -euo pipefail
-        cd "$_ot_rcp_dir"
-        export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.otbrstack"
-        idf.py set-target esp32c6
-        idf.py build
-    )
+    # Optimisation: if source is unchanged and the cache binary exists, restore
+    # it to the build location instead of rebuilding from scratch.  This handles
+    # the case where build/ was cleaned (e.g. SD card pre-seeding excludes it)
+    # but the cached binary was built from the same source version.
+    if [[ "$_src_changed" -eq 0 && -f "$RCP_BIN_CACHE" ]]; then
+        log "Source unchanged — restoring binary from cache (skipping rebuild)."
+        mkdir -p "$(dirname "$_built")"
+        cp "$RCP_BIN_CACHE" "$_built"
+    else
+        log "Building ot_rcp for esp32c6 ..."
+        (
+            set -euo pipefail
+            export IDF_TOOLS_PATH
+            source "${IDF_DIR}/export.sh"
+            set -euo pipefail
+            cd "$_ot_rcp_dir"
+            export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.otbrstack"
+            idf.py set-target esp32c6
+            idf.py build
+        )
+    fi
     echo "$_new_hash" > "$_defaults_hash_file"
 else
     log "Source unchanged — skipping rebuild."
