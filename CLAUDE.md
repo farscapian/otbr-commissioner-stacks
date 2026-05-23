@@ -52,8 +52,6 @@ The env file is sourced automatically — no `export` or `sudo -E` needed.
 | `SSH_PUBKEY` | flash, incus | SSH public key to inject into VM/image |
 | `SSH_MGMT_CIDRS` | flash | Space-separated IPs/CIDRs allowed SSH inbound via UFW (empty = allow all) |
 | `IDF_PATH` | snap, incus | Path to existing ESP-IDF install (optional); if unset and `idf.py` not in PATH, ESP-IDF is auto-cloned to `cache/esp-idf` |
-| `SIM_RCP_BIN` | incus | Path to pre-built `ot-rcp` Linux simulation binary |
-| `SIM_RCP_URL` | incus | Download URL for sim binary (cached as `cache/ot-rcp-sim/ot-rcp`) |
 | `DONGLE_VENDOR` | docker | USB vendor ID for Thread dongle (from `udevadm info`) |
 | `DONGLE_PRODUCT` | docker | USB product ID for Thread dongle |
 | `DONGLE_SERIAL` | docker | USB serial string for Thread dongle (unique; creates stable symlink) |
@@ -61,7 +59,11 @@ The env file is sourced automatically — no `export` or `sudo -E` needed.
 | `BAUD_RATE` | docker | Serial baud rate (default: `460800`) |
 | `INFRA_IF` | snap | Backbone/infrastructure network interface (default: auto-detected) |
 | `THREAD_IF` | snap | Thread virtual interface (default: `wpan0`) |
-| `OT_REPO_PATH` | — | **Removed.** Build-from-source is gone; use `SIM_RCP_BIN`/`SIM_RCP_URL`. |
+| `OT_REPO_PATH` | — | **Removed.** |
+| `SIM_RCP_BIN` | — | **Removed.** Sim binary is built automatically from `cache/openthread/` by `otbrstack vm`. |
+| `SIM_RCP_URL` | — | **Removed.** |
+| `SIM_CLI_BIN` | — | **Removed.** `ot-cli` is built alongside `ot-rcp` and cached at `cache/ot-rcp-sim/ot-cli`. |
+| `SIM_CLI_URL` | — | **Removed.** |
 
 ## Architecture
 
@@ -98,7 +100,8 @@ cache/
   snap/             ← openthread-border-router .snap + .assert (all provisioners)
   esp32/rcp/        ← ESP32-C6 RCP app binary (built from esp-thread-br source)
   esp-idf/          ← shallow clone of espressif/esp-idf (auto-cloned if IDF_PATH unset); ot_rcp example lives at examples/openthread/ot_rcp inside this clone
-  ot-rcp-sim/       ← ot-rcp simulation binary (otbrstack vm)
+  openthread/       ← shallow clone of openthread/openthread; cmake simulation build produces ot-rcp + ot-cli
+  ot-rcp-sim/       ← ot-rcp and ot-cli sim binaries (built from cache/openthread/ by otbrstack vm)
 
 artifacts/
   rpi/<hostname>/   ← cloud-init payloads from otbrstack flash (latest run, overwritten each time)
