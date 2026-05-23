@@ -270,7 +270,10 @@ info "Mounted $BOOT_PART at $MOUNT_DIR"
 #
 #     If the param is already present (e.g. reflash), skip the edit.
 # ---------------------------------------------------------------------------
+# Ubuntu 26.04 arm64+raspi moved kernel files to a firmware/ subdirectory
+# on the system-boot partition; try both locations.
 _CMDLINE_FILE="${MOUNT_DIR}/cmdline.txt"
+[[ -f "$_CMDLINE_FILE" ]] || _CMDLINE_FILE="${MOUNT_DIR}/firmware/cmdline.txt"
 if [[ -f "$_CMDLINE_FILE" ]]; then
     _CMDLINE=$(cat "$_CMDLINE_FILE")
     _CMDLINE_CHANGED=0
@@ -1127,6 +1130,9 @@ UDEV
 #!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# Suppress needrestart kernel-upgrade check — running kernel is always
+# the host kernel, never the arm64 raspi kernel we're installing.
+export NEEDRESTART_MODE=l NEEDRESTART_SUSPEND_THREADS=1
 
 ${_APT_PROXY_CHROOTCMD}
 
