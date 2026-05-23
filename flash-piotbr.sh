@@ -729,6 +729,7 @@ ${NETPLAN_WIFIS}
       [Unit]
       After=otbr-rcp-update.service
       Wants=otbr-rcp-update.service
+      StartLimitBurst=0
       StartLimitAction=none
 
   # 9.1.10 Weekly reboot timer — triggers RCP firmware check via boot service.
@@ -826,6 +827,12 @@ ${NETPLAN_WIFIS}
       apt-get install -y --only-upgrade linux-firmware || true
 
       # -- Ensure snap is installed -------------------------------------------
+      # Stop ModemManager now so it cannot hold ttyACM0 during snap install or
+      # the interface-connect restarts that follow.  The mask (from runcmd)
+      # prevents it from restarting; the explicit stop here is needed because
+      # mask alone does not stop an already-running instance.
+      systemctl stop ModemManager 2>/dev/null || true
+
       # Try the pre-loaded /opt/otbr-snap/ file first (installed with
       # --dangerous since arm64 snap-revision assertions are not publicly
       # fetchable).  Falls back to snap store on failure.
@@ -858,6 +865,10 @@ ${NETPLAN_WIFIS}
       snap connect "\${SNAP}:network-control"  || true
       snap connect "\${SNAP}:raw-usb"          || true
       snap connect "\${SNAP}:avahi-control"    || true
+      # snap connect restarts snap services after each interface change.
+      # Stop the agent again so it doesn't run against an unconfigured radio URL
+      # and hit its StartLimitBurst before we've had a chance to flash the RCP.
+      snap stop "\${SNAP}" 2>/dev/null || true
 
       # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
       if ! snap list chip-tool &>/dev/null; then
