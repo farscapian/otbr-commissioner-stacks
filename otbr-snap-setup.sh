@@ -172,8 +172,23 @@ ensure_kernel_modules() {
 
     for mod in "${modules[@]}"; do
         if ! lsmod | grep -q "^${mod}"; then
-            log "Loading kernel module: $mod"
-            sudo modprobe "$mod"
+            # Try loading; if modprobe reports the module is not found, the
+            # module files are missing — install linux-modules-extra and retry.
+            if ! sudo modprobe "$mod" 2>/dev/null; then
+                if ! modinfo "$mod" &>/dev/null; then
+                    local extras="linux-modules-extra-$(uname -r)"
+                    log "Module $mod not found — installing $extras..."
+                    if [[ -n "${HTTP_PROXY:-}" ]]; then
+                        echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" \
+                            | sudo tee /etc/apt/apt.conf.d/90apt-cache >/dev/null
+                    fi
+                    sudo apt-get install -y "$extras" \
+                        || die "Failed to install $extras. Check your apt sources."
+                fi
+                sudo modprobe "$mod" \
+                    || die "Failed to load kernel module $mod even after installing extras."
+            fi
+            log "Loaded kernel module: $mod"
             loaded=1
         fi
     done
@@ -182,8 +197,7 @@ ensure_kernel_modules() {
     local conf=/etc/modules-load.d/otbr.conf
     if [[ ! -f "$conf" ]]; then
         log "Persisting kernel modules to $conf..."
-        printf '%s
-' "${modules[@]}" | sudo tee "$conf" > /dev/null
+        printf '%s\n' "${modules[@]}" | sudo tee "$conf" > /dev/null
     fi
 
     [[ "$loaded" -eq 1 ]] && sleep 1
@@ -193,13 +207,12 @@ ensure_kernel_modules() {
 # 7. Stop OTBR snap if running (to free the serial port)
 # ---------------------------------------------------------------------------
 
-# OTBR_SNAP_STOPPED — set by maybe_stop_otbr:
+# OTBR_SNAP_STOPPED — set by ensure_otbr_stopped:
 #   false  : snap was not running (or not installed)
-#   true   : snap was running and we stopped it
-#   skip   : snap was running and user declined to stop it
+#   true   : snap was running and has been stopped
 OTBR_SNAP_STOPPED=false
 
-maybe_stop_otbr() {
+ensure_otbr_stopped() {
     if ! snap list openthread-border-router &>/dev/null; then
         log "OTBR snap not installed."
         return 0
@@ -214,16 +227,7 @@ maybe_stop_otbr() {
         return 0
     fi
 
-    warn "openthread-border-router snap is active and currently holds the serial port."
-    local answer
-    read -rp "  Stop it now to run the spinel firmware check? [y/N] " answer
-    if [[ "${answer,,}" != "y" ]]; then
-        warn "Leaving snap running — spinel firmware check will be skipped."
-        OTBR_SNAP_STOPPED=skip
-        return 0
-    fi
-
-    log "Stopping OTBR snap..."
+    log "Stopping OTBR snap to free the serial port for RCP verification..."
     sudo snap stop openthread-border-router
     sleep 2
     OTBR_SNAP_STOPPED=true
@@ -551,57 +555,53 @@ main() {
 
     log "Found $THREAD_DEVICE_TYPE device at: $THREAD_DEVICE_PORT"
 
-    maybe_stop_otbr
+    ensure_otbr_stopped
 
-    if [[ "$OTBR_SNAP_STOPPED" == "skip" ]]; then
-        log "Skipping spinel firmware check (snap still running)."
-    else
-        if [[ "$THREAD_DEVICE_TYPE" == "esp32c6" ]]; then
-            if [[ "$OTBR_SNAP_STOPPED" == "true" ]]; then
-                reload_rcp_device "$THREAD_DEVICE_PORT"
-                log "Re-detecting Thread device after USB reset..."
+    if [[ "$THREAD_DEVICE_TYPE" == "esp32c6" ]]; then
+        if [[ "$OTBR_SNAP_STOPPED" == "true" ]]; then
+            reload_rcp_device "$THREAD_DEVICE_PORT"
+            log "Re-detecting Thread device after USB reset..."
+            find_thread_device || true
+            [[ -n "$THREAD_DEVICE_PORT" ]] \
+                || die "Thread device not found after USB reset."
+            log "Found $THREAD_DEVICE_TYPE at: $THREAD_DEVICE_PORT"
+        fi
+        if ! verify_rcp "$THREAD_DEVICE_PORT"; then
+            local ans
+            read -rp "  Flash RCP firmware onto $THREAD_DEVICE_PORT now? [y/N] " ans
+            if [[ "${ans,,}" == "y" ]]; then
+                IDF_DIR="${SCRIPT_DIR}/cache/esp-idf" \
+                RCP_BIN_CACHE="${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" \
+                    "${SCRIPT_DIR}/scripts/flash_rcp.sh" --port "$THREAD_DEVICE_PORT" --force \
+                    || die "Flashing failed."
+                log "Re-detecting Thread device after flash..."
                 find_thread_device || true
                 [[ -n "$THREAD_DEVICE_PORT" ]] \
-                    || die "Thread device not found after USB reset."
+                    || die "Thread device not found after flashing."
                 log "Found $THREAD_DEVICE_TYPE at: $THREAD_DEVICE_PORT"
-            fi
-            if ! verify_rcp "$THREAD_DEVICE_PORT"; then
-                local ans
-                read -rp "  Flash RCP firmware onto $THREAD_DEVICE_PORT now? [y/N] " ans
-                if [[ "${ans,,}" == "y" ]]; then
-                    IDF_DIR="${SCRIPT_DIR}/cache/esp-idf" \
-                    RCP_BIN_CACHE="${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" \
-                        "${SCRIPT_DIR}/scripts/flash_rcp.sh" --port "$THREAD_DEVICE_PORT" --force \
-                        || die "Flashing failed."
-                    log "Re-detecting Thread device after flash..."
-                    find_thread_device || true
-                    [[ -n "$THREAD_DEVICE_PORT" ]] \
-                        || die "Thread device not found after flashing."
-                    log "Found $THREAD_DEVICE_TYPE at: $THREAD_DEVICE_PORT"
-                    local _flash_ok=0
-                    for _attempt in 1 2 3; do
-                        if verify_rcp "$THREAD_DEVICE_PORT"; then
-                            _flash_ok=1; break
-                        fi
-                        warn "Spinel probe attempt $_attempt/3 failed — retrying in 5s ..."
-                        sleep 5
-                    done
-                    if [[ "$_flash_ok" -eq 0 ]]; then
-                        warn "Still no spinel response after flashing."
-                        warn "Try: unplug the ESP32-C6 USB cable, plug it back in, then re-run."
-                        warn "If the problem persists, verify the USB JTAG interface is functional:"
-                        warn "  idf.py -p $THREAD_DEVICE_PORT monitor"
-                        die "Flashing failed — RCP firmware not responding to Spinel."
+                local _flash_ok=0
+                for _attempt in 1 2 3; do
+                    if verify_rcp "$THREAD_DEVICE_PORT"; then
+                        _flash_ok=1; break
                     fi
-                else
-                    die "No spinel response from $THREAD_DEVICE_PORT. Flash RCP firmware and re-run."
+                    warn "Spinel probe attempt $_attempt/3 failed — retrying in 5s ..."
+                    sleep 5
+                done
+                if [[ "$_flash_ok" -eq 0 ]]; then
+                    warn "Still no spinel response after flashing."
+                    warn "Try: unplug the ESP32-C6 USB cable, plug it back in, then re-run."
+                    warn "If the problem persists, verify the USB JTAG interface is functional:"
+                    warn "  idf.py -p $THREAD_DEVICE_PORT monitor"
+                    die "Flashing failed — RCP firmware not responding to Spinel."
                 fi
+            else
+                die "No spinel response from $THREAD_DEVICE_PORT. Flash RCP firmware and re-run."
             fi
-        else
-            if ! verify_rcp "$THREAD_DEVICE_PORT"; then
-                die "No Spinel response from $THREAD_DEVICE_TYPE on $THREAD_DEVICE_PORT." \
-                    "Flash Thread RCP firmware onto the dongle and re-run."
-            fi
+        fi
+    else
+        if ! verify_rcp "$THREAD_DEVICE_PORT"; then
+            die "No Spinel response from $THREAD_DEVICE_TYPE on $THREAD_DEVICE_PORT." \
+                "Flash Thread RCP firmware onto the dongle and re-run."
         fi
     fi
     configure_otbr "$THREAD_DEVICE_PORT"
