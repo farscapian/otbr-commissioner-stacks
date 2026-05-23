@@ -36,11 +36,25 @@ otbrstack() {
                 return 1
             fi
         fi
+        # Unset every variable declared in .env.example before sourcing the
+        # actual env file.  This ensures commented-out or removed entries don't
+        # silently inherit stale values from the current shell session.
+        while IFS= read -r _eline; do
+            [[ "$_eline" =~ ^[[:space:]]*(#|$) ]] && continue
+            _evar="${_eline%%=*}"; _evar="${_evar%%[[:space:]]*}"
+            [[ -n "$_evar" ]] && unset "$_evar"
+        done < "${_OTBRSTACK_DIR}/.env.example"
         echo "[otbrstack] Loading env from ${_env_file}"
         set -o allexport
         # shellcheck source=/dev/null
         source "$_env_file"
         set +o allexport
+        # Forward HTTP_PROXY to the lowercase vars used by git and curl.
+        # git intentionally ignores uppercase HTTP_PROXY; https_proxy covers
+        # GitHub and other TLS endpoints routed through the Squid CONNECT tunnel.
+        if [[ -n "${HTTP_PROXY:-}" ]]; then
+            export http_proxy="$HTTP_PROXY" https_proxy="$HTTP_PROXY"
+        fi
     fi
 
     case "$cmd" in
@@ -64,7 +78,41 @@ otbrstack() {
             ;;
         flash)
             echo "[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: ${_OTBRSTACK_DIR})"
-            "$_OTBRSTACK_DIR/flash-piotbr.sh" "${_pass_args[@]+"${_pass_args[@]}"}"
+            # Commit any pending changes to the current branch first.
+            (
+                cd "$_OTBRSTACK_DIR"
+                git add -A
+                if ! git diff --cached --quiet; then
+                    git commit -m "TEMP: pre-flash snapshot $(date '+%Y-%m-%d %H:%M:%S')"
+                fi
+            )
+            # Create an isolated git worktree so the main working tree stays on
+            # its current branch and remains fully editable while flashing runs.
+            # The worktree gets its own checkout of a flash branch; cache/ and
+            # artifacts/ are symlinked in so both share the same downloaded files.
+            local _flash_branch="flash/$(date '+%Y%m%d-%H%M%S')"
+            local _flash_wt
+            _flash_wt=$(mktemp -d --suffix="-otbrstack-flash")
+            git -C "$_OTBRSTACK_DIR" worktree add "$_flash_wt" -b "$_flash_branch"
+            for _d in cache artifacts; do
+                [[ -e "$_OTBRSTACK_DIR/$_d" ]] || continue
+                # Remove any directory git may have created here (e.g. if a
+                # file inside cache/ was accidentally tracked) before symlinking.
+                rm -rf "${_flash_wt:?}/$_d"
+                ln -s "$_OTBRSTACK_DIR/$_d" "$_flash_wt/$_d"
+            done
+            echo "[otbrstack] Running flash from worktree: ${_flash_wt}"
+            echo "[otbrstack] Main working tree remains editable on its current branch."
+            "$_flash_wt/flash-piotbr.sh" "${_pass_args[@]+"${_pass_args[@]}"}"
+            local _flash_rc=$?
+            git -C "$_OTBRSTACK_DIR" worktree remove --force "$_flash_wt" \
+                || sudo rm -rf "$_flash_wt"
+            git -C "$_OTBRSTACK_DIR" worktree prune 2>/dev/null || true
+            echo ""
+            echo "[otbrstack] Flash complete. Flash branch preserved at: ${_flash_branch}"
+            echo "[otbrstack] Git HEAD at time of flash:"
+            git -C "$_OTBRSTACK_DIR" log -1 --oneline "$_flash_branch"
+            return $_flash_rc
             ;;
         docker)
             echo "[otbrstack] Docker bare-metal provisioner"
@@ -109,19 +157,21 @@ otbrstack() {
                 ssh -t "$_host" '
                     _cleanup() { kill $(jobs -p) 2>/dev/null; }
                     trap _cleanup EXIT INT TERM
-                    sudo tail -f \
-                        /var/log/cloud-init-output.log \
-                        /var/log/otbr-firstboot.log &
-                    sudo snap logs -f openthread-border-router 2>/dev/null &
+                    # journalctl includes kernel (dmesg), systemd, snap, and
+                    # cloud-init messages in one interleaved timestamped stream.
+                    sudo journalctl -f -o short-iso --no-pager -n 200 &
+                    # otbr-firstboot.log is written directly to file (not via
+                    # journald), so tail it separately.
+                    sudo tail -f /var/log/otbr-firstboot.log 2>/dev/null &
                     wait
                 '
             else
                 ssh "$_host" '
-                    sudo tail -n 40 \
-                        /var/log/cloud-init-output.log \
-                        /var/log/otbr-firstboot.log
+                    echo "=== last-boot journal (kernel + systemd + snap) ==="
+                    sudo journalctl -b -o short-iso --no-pager -n 300
                     echo
-                    sudo snap logs openthread-border-router 2>/dev/null || true
+                    echo "=== /var/log/otbr-firstboot.log ==="
+                    sudo tail -n 80 /var/log/otbr-firstboot.log 2>/dev/null || true
                 '
             fi
             ;;
