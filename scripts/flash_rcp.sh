@@ -25,6 +25,12 @@
 
 set -euo pipefail
 
+# Forward HTTP_PROXY (otbrstack's project variable) to the lowercase env vars
+# that git and curl actually read.  No-op when HTTP_PROXY is unset.
+if [[ -n "${HTTP_PROXY:-}" && -z "${https_proxy:-}" ]]; then
+    export http_proxy="$HTTP_PROXY" https_proxy="$HTTP_PROXY"
+fi
+
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PORT=""
 _FORCE=0
@@ -66,30 +72,52 @@ if [[ -z "$_PORT" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Ensure ESP-IDF is cloned/updated
+# 1. Ensure ESP-IDF is cloned/updated to latest stable release tag
 # ---------------------------------------------------------------------------
 _src_changed=0
 export IDF_TOOLS_PATH
 
+log "Resolving latest ESP-IDF release tag ..."
+_idf_tag=$(git ls-remote --tags --sort=-v:refname \
+    https://github.com/espressif/esp-idf.git 'v[0-9]*' 2>/dev/null \
+    | grep -oE $'\trefs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+    | head -1 | sed 's|.*refs/tags/||') || true
+
+if [[ -z "$_idf_tag" ]]; then
+    # GitHub unreachable (SSL failure, clock skew, no network).
+    # Fall back to the installed clone so the rest of the script can still
+    # verify firmware currency and skip flashing if nothing changed.
+    if [[ -d "$IDF_DIR" ]]; then
+        _idf_tag=$(git -C "$IDF_DIR" describe --tags --exact-match 2>/dev/null \
+            || git -C "$IDF_DIR" rev-parse --short HEAD 2>/dev/null || echo "")
+        [[ -n "$_idf_tag" ]] \
+            || die "GitHub unreachable and cannot determine installed ESP-IDF version"
+        log "GitHub unreachable — using installed ESP-IDF version: ${_idf_tag}"
+    else
+        die "GitHub unreachable and no local ESP-IDF found at ${IDF_DIR}"
+    fi
+else
+    log "Latest ESP-IDF release: $_idf_tag"
+fi
+
 if [[ ! -d "$IDF_DIR" ]]; then
-    log "Cloning ESP-IDF into $IDF_DIR ..."
-    git clone --depth 1 --recurse-submodules --shallow-submodules \
+    log "Cloning ESP-IDF $_idf_tag into $IDF_DIR ..."
+    git clone --depth 1 --branch "$_idf_tag" --recurse-submodules --shallow-submodules \
         https://github.com/espressif/esp-idf.git "$IDF_DIR"
     "${IDF_DIR}/install.sh" esp32c6
     _src_changed=1
 else
-    _hash_before=$(git -C "$IDF_DIR" rev-parse HEAD)
-    log "Updating ESP-IDF ..."
-    git -C "$IDF_DIR" fetch --depth 1 origin
-    git -C "$IDF_DIR" reset --hard origin/HEAD
-    git -C "$IDF_DIR" submodule update --init --recursive
-    "${IDF_DIR}/install.sh" esp32c6
-    _hash_after=$(git -C "$IDF_DIR" rev-parse HEAD)
-    if [[ "$_hash_before" != "$_hash_after" ]]; then
-        log "ESP-IDF updated: ${_hash_before:0:8} → ${_hash_after:0:8}"
+    _idf_cur=$(git -C "$IDF_DIR" describe --tags --exact-match 2>/dev/null \
+        || git -C "$IDF_DIR" rev-parse --short HEAD)
+    if [[ "$_idf_cur" != "$_idf_tag" ]]; then
+        log "Updating ESP-IDF: $_idf_cur → $_idf_tag"
+        git -C "$IDF_DIR" fetch --depth 1 origin tag "$_idf_tag"
+        git -C "$IDF_DIR" -c advice.detachedHead=false checkout "$_idf_tag"
+        git -C "$IDF_DIR" submodule update --init --recursive --depth 1
+        "${IDF_DIR}/install.sh" esp32c6
         _src_changed=1
     else
-        log "ESP-IDF already at latest (${_hash_after:0:8})."
+        log "ESP-IDF already at $_idf_tag."
     fi
 fi
 
