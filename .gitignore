@@ -1,13 +1,6 @@
-# Cache — third-party downloads (images, snaps, sim binaries, firmware downloads)
-# These are large and can be re-downloaded; don't commit them.
-# Use cache/** (not cache/) so git traverses the tree for the exception below.
-cache/**
-
-# Exception: RCP firmware binary — small (~220KB), committed for URL stability
-# so scripts can reference it via raw.githubusercontent.com after push.
-!cache/esp32/
-!cache/esp32/rcp/
-!cache/esp32/rcp/esp_ot_rcp.bin
+# Cache — third-party downloads (images, snaps, sim binaries, firmware)
+# These are large or auto-generated; don't commit them.
+cache/
 
 # Generated VM artifacts
 artifacts/
