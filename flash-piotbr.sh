@@ -853,22 +853,18 @@ ${NETPLAN_WIFIS}
         done
       fi
 
-      # -- Stop the auto-seeded service before connecting interfaces ----------
-      # snapd seeds and auto-starts the snap before cloud-init runcmd runs,
-      # so the service is up without interfaces connected.  Stop it here so
-      # the explicit snap start below is the first run with a correct
-      # AppArmor profile (network-control grants /dev/net/tun access).
-      snap stop "\${SNAP}.otbr-agent" 2>/dev/null || true
+      # -- Disable snap before connecting interfaces --------------------------
+      # snap disable stops all services and tells snapd not to restart them
+      # during subsequent snap connect calls.  This is the clean way to hold
+      # the snap idle while we configure interfaces and flash the RCP.
+      # snap enable + snap start below brings it up once everything is ready.
+      snap disable "\${SNAP}" 2>/dev/null || true
 
       # -- Connect interfaces ------------------------------------------------
       snap connect "\${SNAP}:firewall-control" || true
       snap connect "\${SNAP}:network-control"  || true
       snap connect "\${SNAP}:raw-usb"          || true
       snap connect "\${SNAP}:avahi-control"    || true
-      # snap connect restarts snap services after each interface change.
-      # Stop the agent again so it doesn't run against an unconfigured radio URL
-      # and hit its StartLimitBurst before we've had a chance to flash the RCP.
-      snap stop "\${SNAP}" 2>/dev/null || true
 
       # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
       if ! snap list chip-tool &>/dev/null; then
@@ -900,7 +896,8 @@ ${NETPLAN_WIFIS}
           thread-if=wpan0 \
           autostart=true
 
-        # -- Start the snap service -----------------------------------------
+        # -- Re-enable and start the snap service ---------------------------
+        snap enable "\$SNAP"
         snap start --enable "\$SNAP"
 
         # -- Start interface watcher for immediate eth0/wlan0 failover ------
