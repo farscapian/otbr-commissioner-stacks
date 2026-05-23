@@ -293,7 +293,7 @@ if [[ -f "$_CMDLINE_FILE" ]]; then
     fi
     unset _CMDLINE_CHANGED
 else
-    warn "cmdline.txt not found in system-boot — regulatory param not added"
+    info "cmdline.txt not present in system-boot (expected — Ubuntu 26.04 uses GRUB/UEFI; modprobe.d covers regulatory)"
 fi
 unset _CMDLINE_FILE _CMDLINE
 
@@ -1133,6 +1133,8 @@ export DEBIAN_FRONTEND=noninteractive
 # Suppress needrestart kernel-upgrade check — running kernel is always
 # the host kernel, never the arm64 raspi kernel we're installing.
 export NEEDRESTART_MODE=l NEEDRESTART_SUSPEND_THREADS=1
+mkdir -p /etc/needrestart/conf.d
+printf '%s\n' '\$nrconf{kernelhints} = 0;' > /etc/needrestart/conf.d/no-chroot-hints.conf
 
 ${_APT_PROXY_CHROOTCMD}
 
@@ -1147,6 +1149,7 @@ apt-get install -y \\
 
 if [[ -x /opt/esp-idf/install.sh ]]; then
     export IDF_TOOLS_PATH=/opt/esp-idf-tools
+    export PIP_QUIET=1
     /opt/esp-idf/install.sh esp32c6
 
     if [[ "${_do_rcp_build}" == "1" ]]; then
