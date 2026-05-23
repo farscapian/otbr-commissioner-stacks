@@ -1,271 +1,351 @@
 # otbr-commissioner-stacks
 
-Provision an [OpenThread Border Router](https://openthread.io/guides/border-router) (OTBR)
-across four deployment targets — all driven by the same `.env` file:
+Flash a Raspberry Pi 4B with Ubuntu Server 26.04 LTS, pre-configured as an
+[OpenThread Border Router](https://openthread.io/guides/border-router) (OTBR).
+An ESP32-C6 acts as the Thread Radio Co-Processor (RCP), connected via USB.
 
-| Command | Target | Runtime |
-|---------|--------|---------|
-| `otbrstack flash` | Raspberry Pi 4B (Ubuntu Server 26.04) | snap via cloud-init |
-| `otbrstack snap` | Any Ubuntu bare-metal host | snap (live install) |
-| `otbrstack docker` | Any Ubuntu bare-metal host | Docker CE + nginx |
-| `otbrstack vm x64` / `otbrstack vm arm64` | Incus VM or container | snap (for testing) |
+The same `.env` file drives four deployment paths:
 
-Source `otbrstack.sh` to get the `otbrstack` command (add to `~/.bashrc` for persistence):
+| Command | Where it runs | How |
+|---------|---------------|-----|
+| `otbrstack flash` | Raspberry Pi 4B (SD card) | Ubuntu Server + cloud-init + snap |
+| `otbrstack snap` | Any Ubuntu host (bare metal) | snap (live install) |
+| `otbrstack docker` | Any Ubuntu host (bare metal) | Docker CE + nginx |
+| `otbrstack vm x64` | Incus VM or container (testing) | snap (no hardware needed) |
+
+---
+
+## What you'll need
+
+### Hardware (for the Pi path)
+
+| Item | Notes |
+|------|-------|
+| Raspberry Pi 4B | Pi 3B also works |
+| ESP32-C6 development board | The Thread radio. Connected to the Pi via USB at first boot |
+| microSD card | 8 GB minimum, 16 GB+ recommended |
+| Ethernet cable | Recommended for first boot. Wi-Fi is supported as a fallback |
+
+### Software on your Linux host (x86-64)
+
+- Standard tools: `curl`, `xzcat`, `dd`, `lsblk`, `python3`, `snap`, `rsync`
+- QEMU user-mode emulation (for the arm64 chroot step): `qemu-user-binfmt`
+
+Install any missing packages with:
 
 ```bash
+sudo apt-get install qemu-user-binfmt rsync
+```
+
+---
+
+## Getting started
+
+### 1. Clone the repo and activate the command
+
+```bash
+git clone https://github.com/farscapian/otbr-commissioner-stacks.git
+cd otbr-commissioner-stacks
 source ./otbrstack.sh
 ```
 
-## Hardware
-
-| Component | Notes |
-|-----------|-------|
-| Raspberry Pi 4B | Primary target. Pi 3B also works. |
-| ESP32-C6 (RCP firmware) | Connected via USB; communicates over Spinel/HDLC at 460800 baud. |
-| microSD card | 8 GB minimum. |
-| Network | eth0 (preferred) and/or wlan0 (optional fallback). |
-
-## Host requirements
-
-x86-64 Linux with the following available on `PATH`:
-
-```
-curl  sha256sum  xzcat  dd  mount  umount  partprobe  lsblk  python3  snap
-```
-
-`pyserial` is optional but enables a more reliable RCP probe:
-
-```
-pip3 install pyserial
-# or: sudo apt install python3-serial
-```
-
-## Quick start
-
-**1. Flash RCP firmware onto the ESP32-C6** and connect it via USB before running
-`otbrstack`. It will detect the serial device and probe it for a valid Spinel response.
-
-**2. Generate or export your Thread Active Operational Dataset TLV:**
+The `source` command loads the `otbrstack` shell function into your current
+terminal. To make it permanent, add this line to your `~/.bashrc`:
 
 ```bash
-# On an existing OpenThread device:
-ot-ctl dataset active -x
-
-# Or generate a fresh one:
-ot-ctl dataset init new
-ot-ctl dataset active -x
+source /path/to/otbr-commissioner-stacks/otbrstack.sh
 ```
 
-**3. Create a `.env` file** with your configuration:
+### 2. Create your `.env` file
+
+Copy the example and fill in your values:
 
 ```bash
 cp .env.example .env
-# edit .env with your values
+nano .env   # or your preferred editor
 ```
 
-The env file is sourced automatically, so no `export` or `sudo -E` is needed.
+The two required values are:
 
-**4. Identify your SD card device** (`lsblk`, `dmesg | tail`), then run:
+- **`THREAD_DATASET_TLV`** — your Thread network's Active Operational Dataset (a hex string).
+  If you don't have one yet, generate a new one:
+
+  ```bash
+  # On any machine with the OTBR snap or ot-ctl installed:
+  snap run openthread-border-router.ot-ctl dataset init new
+  snap run openthread-border-router.ot-ctl dataset commit active
+  snap run openthread-border-router.ot-ctl dataset active -x
+  # Copy the hex output into THREAD_DATASET_TLV in your .env
+  ```
+
+  Or if you already have an existing Thread commissioner, export it:
+
+  ```bash
+  ot-ctl dataset active -x
+  ```
+
+- **`SSH_PUBKEY`** — your SSH public key (the contents of `~/.ssh/id_ed25519.pub` or
+  similar). This is injected into the Pi image so you can SSH in without a password.
+
+Everything else in `.env` has sensible defaults. Wi-Fi credentials are optional —
+if you're using Ethernet, leave `WIFI_SSID` and `WIFI_PASSWORD` blank.
+
+### 3. Add an SSH config entry for your Pi
+
+The flash script checks that your `~/.ssh/config` has an entry for the Pi's
+hostname (default: `otbr-raspi4`) so you can reach it by name after boot.
+If one doesn't exist, the script will offer to create it. You can also add
+it manually:
+
+```
+# ~/.ssh/config
+Host otbr-raspi4
+    User ubuntu
+    # HostName 192.168.x.y   # optional if you use mDNS / .local hostname
+```
+
+---
+
+## Flashing the Raspberry Pi
+
+Insert the microSD card into your Linux host and identify its device path
+(`lsblk` or `dmesg | tail` after inserting). It will look like `/dev/sdb`
+or `/dev/mmcblk0` — **never** `/dev/sda` (that's usually your main drive).
 
 ```bash
-# uses .env in the script directory by default
+# Standard flash — asks for confirmation before writing
 otbrstack flash /dev/sdX
 
-# or point to any env file explicitly
-otbrstack flash --env-file=/path/to/production.env /dev/sdX
+# Force a full reflash even if Ubuntu is already on the card
+otbrstack flash -f /dev/sdX
+
+# Skip the confirmation prompt (useful for scripting)
+otbrstack flash -y /dev/sdX
+
+# Use a different env file
+otbrstack flash --env-file=pangolin.env /dev/sdX
+
+# Set a custom hostname for this device
+otbrstack flash --hostname=otbr-kitchen /dev/sdX
 ```
 
-If no `.env` is found and `--env-file` is not given, the command errors out.
+> **Smart re-flash:** If Ubuntu Server is already on the card (detected by the
+> `system-boot` partition label), `otbrstack flash` skips the image download and
+> `dd` step entirely and only rewrites the cloud-init config. This is much faster
+> when you just changed a config value.
 
-`otbrstack flash` will ask for confirmation before writing. All data on the
-target device will be destroyed.
+### What happens during the flash
 
-## What the script does
+1. Downloads `ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz` from
+   Canonical (cached in `cache/ubuntu/server/` — only downloaded once).
+2. Verifies the SHA-256 of the downloaded image.
+3. Expands the root partition to fill the SD card.
+4. Runs an arm64 chroot to pre-install packages (`git`, `cmake`, `python3`, etc.)
+   and pre-load the ESP-IDF toolchain so the Pi doesn't have to download them at boot.
+5. Caches arm64 snaps (`openthread-border-router`, `chip-tool`) and copies them
+   to the SD card so first boot can install offline.
+6. Writes a cloud-init config into the `system-boot` partition that sets up
+   networking, installs and configures the OTBR snap, and seeds the Thread dataset.
 
-1. **Probes the RCP** — sends a Spinel `PROP_VALUE_GET(PROP_NCP_VERSION)` frame
-   over the USB serial port and verifies a valid response. Falls back to a raw
-   HDLC probe if `pyserial` is absent. Records the device path (or schedules
-   auto-detection at boot if no RCP is plugged in yet).
-
-2. **Downloads Ubuntu Server 26.04** (`ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz`) from
-   Canonical, verifies its SHA-256, and extracts it. Both the compressed and
-   extracted images are cached next to the script.
-
-4. **Flashes the image** to the SD card with `dd`.
-
-5. **Injects a cloud-init payload** onto the `system-boot` FAT partition:
-   - **Netplan** — DHCP on eth0 (route metric 100) and, if WiFi credentials are
-     set, wlan0 (metric 200). Linux routing always prefers the lower metric, so
-     eth0 wins when both links are up.
-   - **Wireless regulatory domain** — sets `REGDOMAIN=US` via CRDA and
-     `cfg80211`.
-   - **OTBR interface watcher** — a Python daemon
-     (`/usr/local/sbin/otbr-ifwatcher.py`) that listens for
-     `systemd-networkd` D-Bus events and reconfigures the OTBR snap's backbone
-     interface in real time, always preferring eth0. Falls back to polling every
-     10 s if `python3-dbus`/`python3-gi` are unavailable.
-   - **First-boot script** (`/usr/local/sbin/otbr-firstboot.sh`) — installs the
-     OTBR snap offline, connects snap interfaces, configures the RCP URL and
-     backbone interface, starts the service, and seeds the Thread dataset TLV.
-   - The **OTBR snap** is installed from the snap store on first boot (`snap install openthread-border-router`).
+---
 
 ## First boot
 
-### OTBR first-boot
+Insert the SD card into the Pi, connect the ESP32-C6 via USB, and power on.
 
-First boot takes a few minutes. Progress is logged on the device at:
-
-```
-/var/log/otbr-firstboot.log
-```
-
-The sequence on the device is:
-
-1. cloud-init applies netplan and regulatory settings.
-2. `otbr-firstboot.sh` runs in the background:
-   - Waits for `snapd` to finish seeding.
-   - Installs the OTBR snap from the embedded copy.
-   - Connects snap interfaces (serial-port, network-control, firewall-control,
-     network-observe, raw-usb).
-   - Configures the snap with the RCP URL and backbone interface.
-   - Starts the snap service.
-   - Commits the Thread Active Operational Dataset.
-   - Brings up the Thread interface.
-3. `otbr-ifwatcher.service` starts and monitors interface state changes for the
-   lifetime of the device.
-
-## Smart flash detection
-
-By default, `flash-piotbr.sh` checks whether Ubuntu Server is already on the target device (by looking for the `system-boot` partition label). If found, it skips the image download and `dd` flash entirely and only updates the cloud-init files — much faster when you only changed a config value.
-
-| Flag | Effect |
-|------|--------|
-| _(none)_ | Auto-detect: cloud-init-only if system-boot present, full flash otherwise |
-| `-f` | Force full reflash even if Ubuntu Server is already on the device |
-| `-y` | Skip the `YES` confirmation prompt (full-flash mode only) |
-
-## Testing with Incus (`provision_incus.sh`)
-
-`provision_incus.sh` runs an end-to-end test of the OTBR first-boot sequence inside an Incus VM or system container — no physical hardware required.
-
-**Host requirements:** Incus installed and current user in the `incus` group.
-
-**What it does:**
-
-1. Renders the cloud-init user-data template with env vars.
-2. Creates and starts the Incus instance (VM or container).
-3. Pushes snap cache and sim binary via `incus file push`.
-4. Waits for `ot-ctl state` to confirm the Thread node is active.
-
-**Usage:**
+First boot takes **5–15 minutes** depending on internet speed (the Pi may still
+need to pull some packages). You can watch progress over SSH:
 
 ```bash
-sudo ./provision_incus.sh                       # x86_64 VM, name=otbrvm64
-sudo ./provision_incus.sh --container           # system container, name=otbr-ct
-sudo ./provision_incus.sh --arch=arm64          # arm64 VM (QEMU-emulated), name=otbrarm64
-sudo ./provision_incus.sh --reprovision         # delete and reprovision
+# Tail all logs in real time (journald + firstboot log)
+otbrstack logs -f otbr-raspi4
+
+# Or SSH in and check the firstboot log directly
+ssh otbr-raspi4
+sudo tail -f /var/log/otbr-firstboot.log
 ```
 
-## Bare-metal snap (`otbr-snap-setup.sh`)
+### What happens on first boot
 
-Installs and configures the `openthread-border-router` snap on any Ubuntu
-Server or Desktop host (x86_64 or arm64) with a USB Thread radio attached.
+1. **Networking** — eth0 comes up via DHCP (preferred). If Wi-Fi credentials
+   were set, wlan0 is configured as a fallback.
+2. **RCP firmware** — `otbr-rcp-update.sh` waits for the ESP32-C6 to enumerate,
+   then fetches the latest ESP-IDF release, builds the `ot_rcp` firmware, and
+   flashes it to the ESP32-C6 if the firmware has changed. Identical firmware
+   is detected by SHA-256 and skipped.
+3. **Snap install** — `openthread-border-router` is installed from the pre-loaded
+   copy on the SD card (no store download needed). `chip-tool` is also installed
+   for Matter commissioning.
+4. **OTBR configuration** — snap interfaces are connected, the radio URL is set,
+   the backbone interface is configured, and the service is started.
+5. **Thread dataset** — the TLV from your `.env` is committed and the Thread
+   interface is brought up.
+6. **Firewall** — UFW is enabled. SSH is allowed from the CIDRs in
+   `SSH_MGMT_CIDRS` (or from anywhere if that's empty).
 
-**Host requirements:** `snap`, `python3` (for pyspinel RCP verification)
+After first boot, `otbr-rcp-update.service` runs on every subsequent boot to
+keep the RCP firmware up to date. A weekly timer triggers a reboot to check for
+new firmware.
 
-**Supported radios (auto-detected in priority order):**
-1. ESP32-C6 (Espressif USB vendor `303a`) → `/dev/ttyACM0`
-2. Sonoff Dongle-E / CP210x (Silicon Labs `10c4:ea60`) → `/dev/ttyUSB0`
-
-**What it does:**
-
-1. Loads `.env` and validates `THREAD_DATASET_TLV`.
-2. Adds the current user to the `dialout` group if needed (then exits — re-run after login).
-3. Loads and persists required kernel modules (`ip_set*`).
-4. Detects the USB Thread radio device.
-5. Verifies ESP32-C6 RCP firmware via pyspinel (skipped for Sonoff).
-6. Installs the snap from the store (if absent), sets `radio-url`, `infra-if`, `thread-if`, enables autostart, restarts the snap.
-7. Ensures all required snap interfaces are connected.
-8. Configures UFW rules for Thread/mDNS forwarding if UFW is active.
-9. Commits the Thread dataset and brings up the Thread interface.
-
-**Usage:**
+### Checking OTBR status
 
 ```bash
-./otbr-snap-setup.sh
+ssh otbr-raspi4
+
+# Check Thread state (should be leader, router, or child)
+snap run openthread-border-router.ot-ctl state
+
+# Check active dataset
+snap run openthread-border-router.ot-ctl dataset active -x
+
+# Check snap service status
+snap services openthread-border-router
 ```
 
-Run as your normal user — `sudo` is invoked internally only where needed.
+---
 
-Optional `.env` variables:
+## Remote management
+
+```bash
+# Tail logs from any otbrstack-managed device
+otbrstack logs -f otbr-raspi4
+
+# View last-boot logs (static)
+otbrstack logs otbr-raspi4
+
+# Reboot the device
+otbrstack restart otbr-raspi4
+
+# Graceful shutdown
+otbrstack shutdown otbr-raspi4
+```
+
+---
+
+## Testing without hardware (Incus VM)
+
+`otbrstack vm x64` provisions an Incus VM with the same OTBR first-boot
+sequence — no Raspberry Pi or ESP32-C6 needed. A simulated RCP (`ot-rcp`) is
+built from OpenThread source and used instead of the physical ESP32-C6.
+
+**Prerequisites:** Incus installed, current user in the `incus` group.
+
+```bash
+otbrstack vm x64             # VM (default), instance name: otbr-test-x64
+otbrstack vm x64 --container # system container (faster), name: otbr-test-ct
+otbrstack vm arm64           # arm64 VM (QEMU-emulated, slower)
+```
+
+The first run clones and builds the OpenThread simulator (~5 min). Subsequent
+runs reuse the cached binary at `cache/ot-rcp-sim/ot-rcp`.
+
+To tear down an instance:
+
+```bash
+incus delete otbr-test-x64 --force
+```
+
+### Running the test suite
+
+```bash
+sudo ./tests/test_otbr_vm.sh             # full test, x64 VM
+sudo ./tests/test_otbr_vm.sh --no-peer-test  # skip neighbor exchange (T6)
+```
+
+Six tests verify: Ubuntu 26.04 running, OTBR snap installed, all services
+active, Thread state is leader/router/child, dataset TLV committed, and
+neighbor table has ≥1 entry (T6, requires `ot-cli` binary).
+
+---
+
+## Bare-metal snap (`otbrstack snap`)
+
+Installs and configures the `openthread-border-router` snap on any Ubuntu host
+with a USB Thread radio attached. Runs as your normal user — `sudo` is invoked
+internally only where needed.
+
+**Supported radios (auto-detected):**
+1. ESP32-C6 (USB vendor `303a`) on `/dev/ttyACM0`
+2. Sonoff Dongle-E / CP210x (Silicon Labs `10c4:ea60`) on `/dev/ttyUSB0`
+
+```bash
+otbrstack snap
+```
+
+The script detects the radio, verifies its Spinel firmware (flashing the
+ESP32-C6 if needed), installs and configures the snap, and commits the Thread
+dataset. Optional `.env` variables:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `INFRA_IF` | auto (default route interface) | Backbone network interface |
+| `INFRA_IF` | auto (default route) | Backbone network interface |
 | `THREAD_IF` | `wpan0` | Thread virtual interface name |
 
-## Bare-metal Docker (`otbr-docker-setup.sh`)
+---
 
-Installs Docker CE, pulls `openthread/otbr:latest`, writes a stable udev
-symlink for the USB dongle, and sets up nginx as a reverse proxy — all on a
-plain Ubuntu Server or Desktop host.
+## Bare-metal Docker (`otbrstack docker`)
 
-**Host requirements:** Ubuntu (Debian-based); run as root (`sudo`)
-
-**Supported radios:** Any USB serial Thread dongle identified by vendor/product/serial.
-
-**What it does:**
-
-1. Loads `.env` and validates dongle identification variables.
-2. Disables system sleep/suspend.
-3. Detects the backbone Ethernet interface on `192.168.4.x` (configurable via `TARGET_SUBNET` in the script).
-4. Loads and persists IPv6 kernel modules (`ip6table_filter`, `ip6_tables`).
-5. Writes `/etc/udev/rules.d/99-thread-dongle.rules` to create `/dev/ttyTHREAD`.
-6. Installs Docker CE from the official apt repository.
-7. Pulls the OTBR image and writes `/opt/otbr/otbr-agent` config.
-8. Launches the `otbr` container with `--privileged --network host`.
-9. Installs nginx and configures reverse proxies: REST API on `:8080`, web UI on `:8088`.
-10. Prompts for a Home Assistant IP and sets UFW rules.
-11. Commits the Thread dataset via `docker exec otbr ot-ctl`.
-
-**Usage:**
+Installs Docker CE, pulls `openthread/otbr`, writes a stable udev symlink for
+the USB dongle, and sets up nginx as a reverse proxy. Run as root.
 
 ```bash
-sudo ./otbr-docker-setup.sh
+otbrstack docker
 ```
 
-Required `.env` variables (in addition to `THREAD_DATASET_TLV`):
+Exposes: REST API on `:8080`, web UI on `:8088`.
 
-| Variable | Purpose | How to find |
-|----------|---------|-------------|
-| `DONGLE_VENDOR` | USB vendor ID | `udevadm info /dev/ttyACM0 \| grep ID_VENDOR_ID` |
-| `DONGLE_PRODUCT` | USB product ID | `udevadm info /dev/ttyACM0 \| grep ID_MODEL_ID` |
-| `DONGLE_SERIAL` | USB serial string (unique) | `udevadm info /dev/ttyACM0 \| grep ID_SERIAL_SHORT` |
+Required `.env` variables (find values with `udevadm info /dev/ttyACM0`):
+
+| Variable | Purpose |
+|----------|---------|
+| `DONGLE_VENDOR` | USB vendor ID |
+| `DONGLE_PRODUCT` | USB product ID |
+| `DONGLE_SERIAL` | USB serial string (unique per device) |
 
 Optional:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DONGLE_SYMLINK` | `ttyTHREAD` | Symlink name created under `/dev/` |
-| `BAUD_RATE` | `460800` | Serial baud rate passed to the OTBR agent |
+| `DONGLE_SYMLINK` | `ttyTHREAD` | Symlink name under `/dev/` |
+| `BAUD_RATE` | `460800` | Serial baud rate |
 
-## Partition layout (Ubuntu Server 26.04 arm64+raspi)
+---
 
-| Partition | Filesystem | Label | Purpose |
-|-----------|-----------|-------|---------|
-| p1 | vfat | system-boot | Bootloader, kernel, cloud-init |
-| p2 | ext4 | ubuntu-seed | Snap seed |
-| p3 | ext4 | ubuntu-save | Encrypted save partition |
-| p4 | ext4 | ubuntu-data | Writable data |
+## Environment variable reference
 
-## Files
+All variables are read from your `.env` file. See `.env.example` for the full
+annotated list. Key variables:
 
-| File | Purpose |
-|------|---------|
-| `flash-piotbr.sh` | Flash Ubuntu Server 26.04 to SD card (Raspberry Pi) |
-| `otbr-snap-setup.sh` | Bare-metal snap provisioner (Ubuntu Server/Desktop) |
-| `otbr-docker-setup.sh` | Bare-metal Docker provisioner (Ubuntu Server/Desktop) |
-| `provision_incus.sh` | Incus VM/container test (x86_64 or arm64) |
-| `pangolin.env` / `tvpc.env` | Example env files — copy to `.env` and edit |
-| `cache/` | Downloaded images, snaps, and firmware |
-| `artifacts/` | Generated cloud-init payloads and pyspinel venv |
+| Variable | Used by | Purpose |
+|----------|---------|---------|
+| `THREAD_DATASET_TLV` | all | Thread Active Operational Dataset (hex). Required. |
+| `SSH_PUBKEY` | flash, vm | SSH public key injected into the image |
+| `OTBR_SNAP_CHANNEL` | flash, snap, vm | Snap channel (default: `latest/edge`) |
+| `CHIP_TOOL_SNAP_CHANNEL` | flash | chip-tool snap channel (default: `latest/stable`) |
+| `WIFI_SSID` / `WIFI_PASSWORD` | flash | Wi-Fi credentials (optional; eth0 is preferred) |
+| `OTBR_HOSTNAME` | flash | Device hostname (default: `otbr-raspi4`) |
+| `SSH_MGMT_CIDRS` | flash | Space-separated CIDRs for SSH access via UFW |
+| `HTTP_PROXY` | all | Optional HTTP proxy (e.g. `http://squid.local:3128`) |
+| `INFRA_IF` | snap | Backbone interface (default: auto-detected) |
+| `DONGLE_VENDOR/PRODUCT/SERIAL` | docker | USB dongle identification |
+
+---
+
+## Repository layout
+
+```
+otbrstack.sh          # Shell function — source this to get the otbrstack command
+flash-piotbr.sh       # Raspberry Pi SD card flasher (called by otbrstack flash)
+provision_incus.sh    # Incus VM/container provisioner (called by otbrstack vm)
+otbr-snap-setup.sh    # Bare-metal snap provisioner (called by otbrstack snap)
+otbr-docker-setup.sh  # Bare-metal Docker provisioner (called by otbrstack docker)
+scripts/
+  flash_rcp.sh        # ESP32-C6 RCP firmware builder and flasher
+  verify_rcp.py       # Spinel probe (checks if RCP firmware responds correctly)
+tests/
+  test_otbr_vm.sh     # Integration test suite for Incus provisioning
+.env.example          # Annotated template — copy to .env and edit
+pangolin.env          # Example env for a specific host (copy and adapt)
+cache/                # Downloaded images, snaps, firmware (gitignored)
+artifacts/            # Generated cloud-init payloads (gitignored)
+```
