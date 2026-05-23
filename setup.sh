@@ -60,6 +60,10 @@ install_apt_packages() {
     fi
 
     echo "   Missing: ${missing[*]}"
+    if [[ -n "${HTTP_PROXY:-}" ]]; then
+        echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" \
+            | sudo tee /etc/apt/apt.conf.d/90apt-cache >/dev/null
+    fi
     sudo apt-get update -q
     sudo apt-get install -y "${missing[@]}"
     success "apt packages installed."

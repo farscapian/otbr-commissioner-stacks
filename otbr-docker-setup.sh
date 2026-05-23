@@ -40,8 +40,6 @@ NGINX_REST_PORT="8080"
 NGINX_WEB_PORT="8088"
 OTBR_INTERNAL_REST="127.0.0.1:8081"
 OTBR_INTERNAL_WEB="127.0.0.1:80"
-TARGET_SUBNET="192.168.4"
-
 # -----------------------------------------------------------------------------
 # 3. Disable sleep / suspend
 # -----------------------------------------------------------------------------
@@ -57,18 +55,9 @@ disable_sleep() {
 # -----------------------------------------------------------------------------
 
 detect_interface() {
-    info "4. Detecting Ethernet interface on subnet ${TARGET_SUBNET}.x ..."
-
+    info "4. Detecting Ethernet interface via default route ..."
     local iface
-    iface=$(ip -o -4 addr show \
-        | awk -v subnet="$TARGET_SUBNET" '$4 ~ "^" subnet { print $2 }' \
-        | head -n1)
-
-    if [[ -z "$iface" ]]; then
-        warn "No interface found on ${TARGET_SUBNET}.x — falling back to default route interface."
-        iface=$(ip route show default | awk '/default/ { print $5 }' | head -n1)
-    fi
-
+    iface=$(ip route show default | awk '/default/ { print $5 }' | head -n1)
     [[ -n "$iface" ]] || die "Could not detect a network interface. Set BACKBONE_IF manually."
     BACKBONE_IF="$iface"
     success "Using interface: $BACKBONE_IF"
@@ -133,6 +122,10 @@ install_docker() {
         return
     fi
 
+    if [[ -n "${HTTP_PROXY:-}" ]]; then
+        echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" \
+            | sudo tee /etc/apt/apt.conf.d/90apt-cache >/dev/null
+    fi
     sudo apt-get remove -y docker docker.io containerd runc 2>/dev/null || true
     sudo apt-get update -q
     sudo apt-get install -y ca-certificates curl gnupg
