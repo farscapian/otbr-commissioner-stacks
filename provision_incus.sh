@@ -143,7 +143,8 @@ build_and_flash_rcp() {
         _idf_path="${SCRIPT_DIR}/cache/esp-idf"
         if [[ ! -d "$_idf_path" ]]; then
             info "Cloning ESP-IDF into cache/esp-idf ..."
-            git clone --depth 1 --recurse-submodules --shallow-submodules \
+            git -c advice.detachedHead=false clone --depth 1 \
+                --recurse-submodules --shallow-submodules \
                 https://github.com/espressif/esp-idf.git "$_idf_path"
             "${_idf_path}/install.sh" esp32c6
             _src_changed=1
@@ -366,6 +367,10 @@ fi
 
 command -v curl    &>/dev/null || die "curl not found"
 command -v python3 &>/dev/null || die "python3 not found"
+if [[ -n "${HTTP_PROXY:-}" ]]; then
+    echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" \
+        | sudo tee /etc/apt/apt.conf.d/90apt-cache >/dev/null
+fi
 command -v lsof    &>/dev/null || sudo apt-get install -y lsof >/dev/null
 # envsubst for template processing
 command -v envsubst &>/dev/null || sudo apt-get install -y gettext-base >/dev/null
@@ -390,37 +395,47 @@ if [[ -z "${RCP_DEVICE:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Sim binary
+# 4. Sim binary — build from OpenThread source if not cached
+#    The simulation ot-rcp and ot-cli binaries are Linux-native executables
+#    built from the OpenThread repository (cloned to cache/openthread/).
+#    Both are produced by a single cmake simulation build; ot-rcp is used
+#    here, and ot-cli is picked up by tests/test_otbr_vm.sh.
 # ---------------------------------------------------------------------------
 
 SIM_RCP_DIR="${SCRIPT_DIR}/cache/ot-rcp-sim"
 SIM_RCP_BIN_PATH="${SIM_RCP_DIR}/ot-rcp"
+_OT_SRC="${SCRIPT_DIR}/cache/openthread"
 
 if [[ -z "${RCP_DEVICE:-}" ]]; then
     step "Locating sim RCP binary"
 
-    if [[ -n "${SIM_RCP_BIN:-}" ]]; then
-        [[ -f "$SIM_RCP_BIN" ]] || die "SIM_RCP_BIN set but not found: $SIM_RCP_BIN"
-        chmod +x "$SIM_RCP_BIN"
-        SIM_RCP_DIR="$(dirname "$SIM_RCP_BIN")"
-        SIM_RCP_BIN_PATH="$SIM_RCP_BIN"
-        info "Using SIM_RCP_BIN: $SIM_RCP_BIN_PATH"
-    elif [[ -f "$SIM_RCP_BIN_PATH" ]]; then
+    if [[ -f "$SIM_RCP_BIN_PATH" ]]; then
         chmod +x "$SIM_RCP_BIN_PATH"
         info "Cached sim binary: $SIM_RCP_BIN_PATH"
-    elif [[ -n "${SIM_RCP_URL:-}" ]]; then
-        info "Downloading sim binary from: $SIM_RCP_URL"
-        mkdir -p "$SIM_RCP_DIR"
-        curl -L --progress-bar -o "$SIM_RCP_BIN_PATH" "$SIM_RCP_URL"
-        chmod +x "$SIM_RCP_BIN_PATH"
     else
-        die "No sim binary available. Set one of these in your .env:
-  SIM_RCP_BIN=/path/to/ot-rcp        (local Linux binary matching instance arch: ${INSTANCE_ARCH})
-  SIM_RCP_URL=https://...ot-rcp       (download URL)
-Build from source: cd openthread && ./script/cmake-build simulation
-  Binary: build/simulation/examples/apps/ncp/ot-rcp"
+        info "sim binary not found — building from OpenThread source ..."
+        if [[ ! -d "$_OT_SRC" ]]; then
+            info "Cloning OpenThread into cache/openthread ..."
+            git -c advice.detachedHead=false clone --depth 1 \
+                https://github.com/openthread/openthread.git "$_OT_SRC"
+        fi
+        (
+            set -euo pipefail
+            cd "$_OT_SRC"
+            ./script/cmake-build simulation
+        )
+        mkdir -p "$SIM_RCP_DIR"
+        cp "${_OT_SRC}/build/simulation/examples/apps/ncp/ot-rcp" "$SIM_RCP_BIN_PATH"
+        chmod +x "$SIM_RCP_BIN_PATH"
+        # ot-cli is built alongside ot-rcp; cache it for the test suite.
+        _ot_cli_built="${_OT_SRC}/build/simulation/examples/apps/cli/ot-cli"
+        [[ -f "$_ot_cli_built" ]] && cp "$_ot_cli_built" "${SIM_RCP_DIR}/ot-cli" \
+            && chmod +x "${SIM_RCP_DIR}/ot-cli" || true
+        unset _ot_cli_built
+        info "Sim binaries built: $SIM_RCP_BIN_PATH"
     fi
 fi
+unset _OT_SRC
 
 # ---------------------------------------------------------------------------
 # 5. Snap cache

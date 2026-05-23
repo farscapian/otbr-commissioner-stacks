@@ -15,8 +15,7 @@
 # T6 in simulation mode: two ot-cli POSIX simulation nodes (IDs 2, 3) are
 # spawned inside the same instance. They share the VM loopback with ot-rcp
 # node 1 and join the Thread network via the same dataset TLV. Requires an
-# ot-cli binary at cache/ot-rcp-sim/ot-cli or via SIM_CLI_URL / SIM_CLI_BIN
-# in the env file.
+# ot-cli binary at cache/ot-rcp-sim/ot-cli (built automatically by otbrstack vm).
 #
 # Build ot-cli from OpenThread source:
 #   cd openthread && ./script/cmake-build simulation
@@ -234,21 +233,11 @@ if [[ "$SKIP_PEER_TEST" -eq 1 ]]; then
 elif [[ "$_thread_state" != "leader" && "$_thread_state" != "router" && "$_thread_state" != "child" ]]; then
     skip_test "Neighbor exchange" "Thread not active (T4 failed)"
 else
-    OT_CLI_CACHE="${REPO_DIR}/cache/ot-rcp-sim/ot-cli"
-    OT_CLI_BIN="${SIM_CLI_BIN:-$OT_CLI_CACHE}"
-    OT_CLI_URL="${SIM_CLI_URL:-}"
-
-    if [[ ! -f "$OT_CLI_BIN" && -n "$OT_CLI_URL" ]]; then
-        echo "  Downloading ot-cli from $OT_CLI_URL ..."
-        mkdir -p "$(dirname "$OT_CLI_CACHE")"
-        curl -fsSL -o "$OT_CLI_CACHE" "$OT_CLI_URL"
-        chmod +x "$OT_CLI_CACHE"
-        OT_CLI_BIN="$OT_CLI_CACHE"
-    fi
+    OT_CLI_BIN="${REPO_DIR}/cache/ot-rcp-sim/ot-cli"
 
     if [[ ! -f "$OT_CLI_BIN" ]]; then
         skip_test "Neighbor exchange" \
-            "ot-cli not found; set SIM_CLI_URL or SIM_CLI_BIN in .env, or place binary at cache/ot-rcp-sim/ot-cli"
+            "ot-cli not found at cache/ot-rcp-sim/ot-cli — run 'otbrstack vm' first to build it from source"
     else
         incus file push --mode 0755 "$OT_CLI_BIN" "${INST}/root/ot-rcp-sim/ot-cli"
 
