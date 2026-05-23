@@ -74,6 +74,7 @@ WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASSWORD="${WIFI_PASSWORD:-}"
 SSH_PUBKEY="${SSH_PUBKEY:-}"
 OTBR_SNAP_CHANNEL="${OTBR_SNAP_CHANNEL:-latest/edge}"
+CHIP_TOOL_SNAP_CHANNEL="${CHIP_TOOL_SNAP_CHANNEL:-latest/stable}"
 SSH_MGMT_CIDRS="${SSH_MGMT_CIDRS:-}"
 
 THREAD_DATASET_TLV="${THREAD_DATASET_TLV:?'Set THREAD_DATASET_TLV in the env file'}"
@@ -338,6 +339,7 @@ if [[ -n "$WIFI_SSID" && -n "$WIFI_PASSWORD" ]]; then
         wifis:
           wlan0:
             dhcp4: true
+            accept-ra: true
             optional: true
             dhcp4-overrides:
               route-metric: 200
@@ -376,11 +378,24 @@ fi
 _VERIFY_RCP_B64=$(base64 -w 0 "${SCRIPT_DIR}/scripts/verify_rcp.py")
 _FLASH_RCP_B64=$(base64 -w 0 "${SCRIPT_DIR}/scripts/flash_rcp.sh")
 
+# Conditionally build the cloud-init apt proxy stanza and the chroot proxy
+# command.  Both are empty when HTTP_PROXY is unset, so users without a
+# local cache get direct internet access with no config changes required.
+_APT_PROXY_YAML=""
+_APT_PROXY_CHROOTCMD=""
+if [[ -n "${HTTP_PROXY:-}" ]]; then
+    _APT_PROXY_YAML="apt:
+  http_proxy: ${HTTP_PROXY}
+"
+    _APT_PROXY_CHROOTCMD="echo 'Acquire::http::Proxy \"${HTTP_PROXY}\";' > /etc/apt/apt.conf.d/90apt-cache"
+fi
+
 cat > "${CI_DIR}/user-data" <<USERDATA
 #cloud-config
 
 ${USERS_SECTION}
 
+${_APT_PROXY_YAML}
 # Install iw before runcmd so 'iw reg set US' works.  The packages module
 # runs earlier in cloud-init's lifecycle than runcmd.
 packages:
@@ -416,6 +431,7 @@ write_files:
             dhcp4: true
             dhcp4-overrides:
               route-metric: 100
+            accept-ra: true
             optional: true
 ${NETPLAN_WIFIS}
 
@@ -617,6 +633,21 @@ ${NETPLAN_WIFIS}
       log() { printf '[rcp-update] %s\n' "\$*" | tee -a "\$LOG"; }
       log "=== RCP update \$(date) ==="
 
+      # Proxy for git/curl — baked in at flash time from HTTP_PROXY env var.
+      # git ignores uppercase HTTP_PROXY, so we export the lowercase variants.
+      ${HTTP_PROXY:+export http_proxy="${HTTP_PROXY}" https_proxy="${HTTP_PROXY}"}
+
+      # Wait up to 60 s for NTP to sync.  The Pi has no RTC, so its clock
+      # starts from fake-hwclock's last saved value.  git ls-remote uses
+      # TLS, and TLS cert validation fails when the clock is significantly
+      # wrong.  NTP usually syncs within 10-20 s on a LAN.
+      for _ntp_i in \$(seq 1 20); do
+        timedatectl show --property=NTPSynchronized --value 2>/dev/null \
+          | grep -q yes && break
+        log "Waiting for NTP sync (\${_ntp_i}/20)..."
+        sleep 3
+      done
+
       systemctl stop ModemManager 2>/dev/null || true
       sleep 1
 
@@ -679,7 +710,15 @@ ${NETPLAN_WIFIS}
       [Install]
       WantedBy=multi-user.target
 
-  # 9.1.9 Drop-in: make the OTBR snap agent wait for RCP firmware update.
+  # 9.1.8b Load tun module at boot (required for /dev/net/tun used by otbr-agent).
+  - path: /etc/modules-load.d/otbr.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      tun
+
+  # 9.1.9 Drop-in: make the OTBR snap agent wait for RCP firmware update;
+  #        disable StartLimitAction=reboot so crashes don't boot-loop the Pi.
   - path: /etc/systemd/system/snap.openthread-border-router.otbr-agent.service.d/10-radio-detect.conf
     owner: root:root
     permissions: '0644'
@@ -687,6 +726,7 @@ ${NETPLAN_WIFIS}
       [Unit]
       After=otbr-rcp-update.service
       Wants=otbr-rcp-update.service
+      StartLimitAction=none
 
   # 9.1.10 Weekly reboot timer — triggers RCP firmware check via boot service.
   - path: /etc/systemd/system/otbr-weekly-reboot.timer
@@ -783,20 +823,14 @@ ${NETPLAN_WIFIS}
       apt-get install -y --only-upgrade linux-firmware || true
 
       # -- Ensure snap is installed -------------------------------------------
-      # If the snap was pre-seeded at flash time (seed.yaml), snapd installs it
-      # automatically during its first-boot seeding phase (snap wait system
-      # seed.loaded completes only after seeding is done).  If seeding did not
-      # include the snap, try the pre-loaded file, then fall back to the store.
+      # Try the pre-loaded /opt/otbr-snap/ file first (installed with
+      # --dangerous since arm64 snap-revision assertions are not publicly
+      # fetchable).  Falls back to snap store on failure.
       if ! snap list "\$SNAP" &>/dev/null; then
         _snap_file=\$(ls /opt/otbr-snap/*.snap 2>/dev/null | head -1)
         if [[ -n "\$_snap_file" ]]; then
           echo "Installing \$SNAP from pre-loaded file: \$(basename "\$_snap_file")"
-          _assert="\${_snap_file%.snap}.assert"
-          [[ -f "\$_assert" ]] && snap ack "\$_assert" 2>/dev/null || true
-          if ! snap install "\$_snap_file" 2>/dev/null; then
-            echo "\$SNAP assertion check failed — retrying with --dangerous"
-            snap install --dangerous "\$_snap_file" || true
-          fi
+          snap install --dangerous "\$_snap_file" || true
           snap switch "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} 2>/dev/null || true
         fi
       fi
@@ -809,6 +843,13 @@ ${NETPLAN_WIFIS}
         done
       fi
 
+      # -- Stop the auto-seeded service before connecting interfaces ----------
+      # snapd seeds and auto-starts the snap before cloud-init runcmd runs,
+      # so the service is up without interfaces connected.  Stop it here so
+      # the explicit snap start below is the first run with a correct
+      # AppArmor profile (network-control grants /dev/net/tun access).
+      snap stop "\${SNAP}.otbr-agent" 2>/dev/null || true
+
       # -- Connect interfaces ------------------------------------------------
       snap connect "\${SNAP}:firewall-control" || true
       snap connect "\${SNAP}:network-control"  || true
@@ -816,7 +857,15 @@ ${NETPLAN_WIFIS}
       snap connect "\${SNAP}:avahi-control"    || true
 
       # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
-      snap list chip-tool &>/dev/null || snap install chip-tool || true
+      if ! snap list chip-tool &>/dev/null; then
+        _ct_file=\$(ls /opt/chip-tool/*.snap 2>/dev/null | head -1)
+        if [[ -n "\$_ct_file" ]]; then
+          snap install --dangerous "\$_ct_file" || true
+        else
+          snap install chip-tool || true
+        fi
+        unset _ct_file
+      fi
 
       # -- Update/flash RCP firmware; sets snap radio-url ------------------
       mkdir -p /var/lib/otbr
@@ -957,6 +1006,16 @@ done
 if [[ -z "$_ROOT_PART" ]]; then
     warn "Cannot locate root partition (p2) — brcmfmac config will apply from second boot via cloud-init."
 else
+    # Expand the root partition to fill the SD card before mounting/chroot so
+    # the chroot has full disk space.  Cloud-init growpart would do this on
+    # first boot, but that's too late for our pre-seeding step.
+    info "Expanding root partition to fill ${TARGET_DEV} ..."
+    sudo parted -s "$TARGET_DEV" resizepart 2 100%
+    sudo partprobe "$TARGET_DEV" 2>/dev/null || true
+    sudo e2fsck -f -y "$_ROOT_PART" >/dev/null 2>&1 || true
+    sudo resize2fs "$_ROOT_PART"
+    info "Root partition expanded."
+
     _ROOT_DIR=$(mktemp -d /tmp/uc-root-XXXXXX)
     if sudo mount "$_ROOT_PART" "$_ROOT_DIR" 2>/dev/null; then
         info "Mounted root partition $_ROOT_PART — writing kernel config..."
@@ -985,16 +1044,50 @@ UDEV
         if [[ "$CLOUD_INIT_ONLY" -eq 0 ]]; then
 
             # ------------------------------------------------------------------
+            # Update (or clone) ESP-IDF cache so the pre-seeded SD card has
+            # the latest source.  Doing this here means the Pi's boot-time
+            # git fetch has nothing (or almost nothing) to pull.
+            # ------------------------------------------------------------------
+            _IDF_CACHE="${SCRIPT_DIR}/cache/esp-idf"
+            info "Resolving latest ESP-IDF release tag ..."
+            _idf_tag=$(git ls-remote --tags --sort=-v:refname \
+                https://github.com/espressif/esp-idf.git 'v[0-9]*' \
+                | grep -oE $'\trefs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+                | head -1 | sed 's|.*refs/tags/||')
+            [[ -n "$_idf_tag" ]] || die "Could not resolve latest ESP-IDF release tag"
+            info "Latest ESP-IDF release: $_idf_tag"
+
+            if [[ -d "$_IDF_CACHE/.git" ]]; then
+                _idf_cur=$(git -C "$_IDF_CACHE" describe --tags --exact-match 2>/dev/null \
+                    || git -C "$_IDF_CACHE" rev-parse --short HEAD)
+                if [[ "$_idf_cur" != "$_idf_tag" ]]; then
+                    info "Updating ESP-IDF cache: $_idf_cur → $_idf_tag"
+                    git -C "$_IDF_CACHE" fetch --depth 1 origin tag "$_idf_tag"
+                    git -C "$_IDF_CACHE" checkout "$_idf_tag"
+                    git -C "$_IDF_CACHE" submodule update --init --recursive --depth 1
+                    info "ESP-IDF cache updated to $_idf_tag."
+                else
+                    info "ESP-IDF cache already at $_idf_tag."
+                fi
+            elif [[ ! -d "$_IDF_CACHE" ]]; then
+                info "Cloning ESP-IDF $_idf_tag into cache ..."
+                git -c advice.detachedHead=false clone --depth 1 --branch "$_idf_tag" \
+                    --recurse-submodules --shallow-submodules \
+                    https://github.com/espressif/esp-idf.git "$_IDF_CACHE"
+                info "ESP-IDF cloned at $_idf_tag."
+            fi
+
+            # ------------------------------------------------------------------
             # Pre-load ESP-IDF source BEFORE the chroot so install.sh is
             # available inside it.  Build/ dirs are excluded — they hold
             # host-arch (x86_64) objects that are useless on the Pi.
             # ------------------------------------------------------------------
-            if [[ -d "${SCRIPT_DIR}/cache/esp-idf" ]]; then
-                _idf_size=$(du -sh "${SCRIPT_DIR}/cache/esp-idf" | cut -f1)
+            if [[ -d "$_IDF_CACHE" ]]; then
+                _idf_size=$(du -sh "$_IDF_CACHE" | cut -f1)
                 info "Pre-loading ESP-IDF source (${_idf_size}, skipping build/ dirs) → /opt/esp-idf ..."
                 sudo mkdir -p "$_ROOT_DIR/opt/esp-idf"
-                sudo rsync -a --exclude='build/' \
-                    "${SCRIPT_DIR}/cache/esp-idf/" "$_ROOT_DIR/opt/esp-idf"
+                sudo rsync -a --chown=root:root --exclude='build/' \
+                    "${_IDF_CACHE}/" "$_ROOT_DIR/opt/esp-idf"
                 info "ESP-IDF source pre-loaded."
             else
                 info "cache/esp-idf not found — Pi will clone ESP-IDF on first boot."
@@ -1034,6 +1127,8 @@ UDEV
 #!/usr/bin/env bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+${_APT_PROXY_CHROOTCMD}
 
 apt-get update -q
 apt-get upgrade -y
@@ -1135,96 +1230,76 @@ CHROOTSCRIPT
             unset _built_bin _do_rcp_build
 
             # ------------------------------------------------------------------
-            # Ensure we have the arm64 snap.  cache/snap/ holds the host-arch
-            # (amd64) version used by Incus x64 VMs.  For the Pi we need arm64.
-            # `snap download` has no --arch flag; use the Snap Store REST API.
+            # Download arm64 snaps from Snap Store REST API.
+            # cache/snap/ holds host-arch (amd64) for Incus x64 VMs;
+            # cache/snap-arm64/ holds arm64 for Raspberry Pi.
+            # `snap download` has no --arch flag, so we use the v2 API directly.
+            #
+            # The API returns channel names without the "latest/" track prefix
+            # (e.g. "edge" not "latest/edge"), so strip it before comparing.
             # ------------------------------------------------------------------
             _SNAP_ARM64="${SCRIPT_DIR}/cache/snap-arm64"
             mkdir -p "$_SNAP_ARM64"
-            if ! compgen -G "${_SNAP_ARM64}/openthread-border-router_*.snap" > /dev/null 2>&1; then
-                info "Fetching arm64 snap metadata from Snap Store ..."
-                _snap_ok=1
-                _snap_info=""
-                if ! _snap_info=$(curl -fsSL \
+
+            # _cache_snap <snap-name> <channel>
+            # Downloads .snap into _SNAP_ARM64 if not already cached.
+            _cache_snap() {
+                local _sname="$1" _channel="$2"
+                if compgen -G "${_SNAP_ARM64}/${_sname}_*.snap" > /dev/null 2>&1; then
+                    info "${_sname} arm64 snap already cached: $(basename "$(ls "${_SNAP_ARM64}/${_sname}_"*.snap | head -1)")"
+                    return 0
+                fi
+                info "Fetching arm64 ${_sname} metadata (channel: ${_channel}) ..."
+                local _info=""
+                if ! _info=$(curl -fsSL \
                         --retry 3 --retry-delay 5 --max-time 60 \
                         -H 'Snap-Device-Series: 16' \
                         -H 'Snap-Device-Architecture: arm64' \
-                        "https://api.snapcraft.io/v2/snaps/info/openthread-border-router?fields=channel-map,snap-id"); then
-                    warn "Snap Store API unreachable — Pi will install snap from store on first boot."
-                    _snap_ok=0
+                        "https://api.snapcraft.io/v2/snaps/info/${_sname}?fields=channel-map,snap-id,download,revision"); then
+                    warn "Snap Store API unreachable for ${_sname} — Pi will install from store."
+                    return 1
                 fi
-
-                if [[ "$_snap_ok" -eq 1 ]]; then
-                    read -r _snap_id _dl_url _revision _sha3 < <(echo "$_snap_info" | python3 -c "
+                local _snap_id _dl_url _revision _sha3
+                read -r _snap_id _dl_url _revision _sha3 < <(echo "$_info" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 snap_id = d.get('snap-id', '')
 channel = sys.argv[1]
+# API omits 'latest/' prefix for the default track
+api_ch = channel[len('latest/'):] if channel.startswith('latest/') else channel
 for e in d.get('channel-map', []):
     c = e.get('channel', {})
-    if c.get('name') == channel and c.get('architecture') == 'arm64':
+    if c.get('name') == api_ch and c.get('architecture') == 'arm64':
         dl = e.get('download', {})
-        print(snap_id, dl['url'], e['revision'], dl['sha3-384'])
+        print(snap_id, dl.get('url',''), e.get('revision',''), dl.get('sha3-384',''))
         sys.exit(0)
 print(snap_id, '', '', '')
-" "${OTBR_SNAP_CHANNEL}")
-                    if [[ -z "$_dl_url" ]]; then
-                        warn "No arm64 openthread-border-router found on channel ${OTBR_SNAP_CHANNEL} — Pi will install from store."
-                        _snap_ok=0
-                    fi
+" "$_channel")
+                if [[ -z "$_dl_url" ]]; then
+                    warn "No arm64 ${_sname} on channel ${_channel} — Pi will install from store."
+                    return 1
                 fi
-
-                if [[ "$_snap_ok" -eq 1 ]]; then
-                    _snap_basename="openthread-border-router_${_revision}"
-                    info "Downloading ${_snap_basename}.snap (arm64) ..."
-                    if curl -fL --progress-bar \
-                            --retry 3 --retry-delay 10 --max-time 600 \
-                            -o "${_SNAP_ARM64}/${_snap_basename}.snap" \
-                            "$_dl_url"; then
-                        # Fetch snap-revision + snap-declaration assertions.
-                        # Canonical's account-key is built into snapd, so these two
-                        # are sufficient for `snap ack` to verify the snap.
-                        {
-                            curl -fsSL --retry 3 --retry-delay 5 --max-time 30 \
-                                "https://assertions.ubuntu.com/v1/assertions/snap-revision;snap-sha3-384=${_sha3}"
-                            printf '\n\n'
-                            curl -fsSL --retry 3 --retry-delay 5 --max-time 30 \
-                                "https://assertions.ubuntu.com/v1/assertions/snap-declaration;series=16;snap-id=${_snap_id}"
-                        } > "${_SNAP_ARM64}/${_snap_basename}.assert" \
-                            || warn "Could not fetch snap assertions — Pi may need store on first boot."
-                        info "arm64 snap cached: ${_snap_basename}"
-                    else
-                        warn "Failed to download arm64 snap — Pi will install from store on first boot."
-                        rm -f "${_SNAP_ARM64}/${_snap_basename}.snap"
-                    fi
-                    unset _snap_id _dl_url _revision _sha3 _snap_basename
+                local _base="${_sname}_${_revision}"
+                info "Downloading ${_base}.snap (arm64, ${_channel}) ..."
+                if curl -fL --progress-bar \
+                        --retry 3 --retry-delay 10 --max-time 600 \
+                        -o "${_SNAP_ARM64}/${_base}.snap" \
+                        "$_dl_url"; then
+                    info "${_sname} arm64 snap cached: ${_base}"
+                else
+                    warn "Failed to download ${_sname} arm64 snap — Pi will install from store."
+                    rm -f "${_SNAP_ARM64}/${_base}.snap"
+                    return 1
                 fi
-                unset _snap_info _snap_ok
-            else
-                info "arm64 snap cached: $(basename "$(ls "${_SNAP_ARM64}"/openthread-border-router_*.snap | head -1)")"
-            fi
+            }
 
-            # Pre-seed the OTBR snap so snapd installs it offline on first
-            # boot without contacting the snap store.
-            _snap_src=$(ls "${_SNAP_ARM64}"/openthread-border-router_*.snap 2>/dev/null | head -1)
-            if [[ -n "$_snap_src" ]]; then
-                _snap_assert="${_snap_src%.snap}.assert"
-                _snap_basename=$(basename "$_snap_src")
-                sudo mkdir -p \
-                    "$_ROOT_DIR/var/lib/snapd/seed/snaps" \
-                    "$_ROOT_DIR/var/lib/snapd/seed/assertions"
-                sudo cp "$_snap_src" \
-                    "$_ROOT_DIR/var/lib/snapd/seed/snaps/$_snap_basename"
-                [[ -f "$_snap_assert" ]] && sudo cp "$_snap_assert" \
-                    "$_ROOT_DIR/var/lib/snapd/seed/assertions/$(basename "$_snap_assert")"
-                sudo tee "$_ROOT_DIR/var/lib/snapd/seed/seed.yaml" > /dev/null <<SEEDEOF
-snaps:
-  - name: openthread-border-router
-    channel: ${OTBR_SNAP_CHANNEL}
-    file: ${_snap_basename}
-SEEDEOF
-                info "OTBR snap seeded: $_snap_basename"
-            fi
+            _cache_snap "openthread-border-router" "${OTBR_SNAP_CHANNEL}"
+            _cache_snap "chip-tool" "${CHIP_TOOL_SNAP_CHANNEL}"
+
+            # No seed.yaml: snapd requires store-signed snap-revision assertions
+            # for offline seeding, and those are not fetchable via the public API
+            # (arm64 snap-revision assertions require snapd's internal batch RPC).
+            # The /opt/otbr-snap/ fallback in firstboot.sh covers offline install.
 
             # Pre-built RCP binary — flash_rcp.sh compares sha256 against this;
             # identical hash skips the flash step on first boot.
@@ -1235,19 +1310,27 @@ SEEDEOF
                 info "RCP binary pre-loaded: /var/lib/otbr/esp_ot_rcp.bin"
             fi
 
-            # OTBR snap + assertion at /opt/otbr-snap/ — firstboot.sh uses this
-            # as a fallback if the snapd seed doesn't work.
+            # OTBR snap at /opt/otbr-snap/ — firstboot.sh installs with --dangerous.
             _snap_src=("${_SNAP_ARM64}"/openthread-border-router_*.snap)
             if [[ -f "${_snap_src[0]}" ]]; then
                 sudo mkdir -p "$_ROOT_DIR/opt/otbr-snap"
                 sudo cp "${_SNAP_ARM64}"/openthread-border-router_*.snap \
-                        "${_SNAP_ARM64}"/openthread-border-router_*.assert \
-                    "$_ROOT_DIR/opt/otbr-snap/" 2>/dev/null || true
+                    "$_ROOT_DIR/opt/otbr-snap/"
                 info "OTBR snap pre-loaded: $(basename "${_snap_src[0]}")"
             else
-                info "arm64 snap not cached — Pi will install from snap store."
+                info "arm64 OTBR snap not cached — Pi will install from snap store."
             fi
-            unset _SNAP_ARM64 _snap_src _snap_assert _snap_basename
+
+            # chip-tool snap at /opt/chip-tool/ — firstboot.sh installs with --dangerous.
+            _ct_src=$(ls "${_SNAP_ARM64}"/chip-tool_*.snap 2>/dev/null | head -1)
+            if [[ -n "$_ct_src" ]]; then
+                sudo mkdir -p "$_ROOT_DIR/opt/chip-tool"
+                sudo cp "${_SNAP_ARM64}"/chip-tool_*.snap "$_ROOT_DIR/opt/chip-tool/"
+                info "chip-tool snap pre-loaded: $(basename "$_ct_src")"
+            else
+                info "arm64 chip-tool not cached — Pi will install from snap store."
+            fi
+            unset _SNAP_ARM64 _snap_src _ct_src
 
         fi  # CLOUD_INIT_ONLY=0
 
