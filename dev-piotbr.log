@@ -1,5 +1,5 @@
-=== run_rpiotbr_cycle.sh 2026-05-24 17:33:08 ===
-Device: /dev/sdb  Hostname: dev-piotbr  Skip-prompt: 0
+=== run_rpiotbr_cycle.sh 2026-05-24 18:48:53 ===
+Device: /dev/sdc  Hostname: dev-piotbr  Skip-prompt: 0
 
 --- Phase 1: Flash ---
 [otbrstack] Loading env from /home/derek/Sync/mini_projects/otbr_commissioner_stacks/pangolin.env
