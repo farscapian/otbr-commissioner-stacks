@@ -4,25 +4,74 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$SCRIPT_DIR/dev-piotbr.log"
 HOSTNAME_FLAG="dev-piotbr"
-DEVICE="/dev/sdd"
+DEVICE=""   # auto-detected from SD_CARD_PATHS unless --device= is given
 YES=0
+ENV_FILE="$SCRIPT_DIR/.env"
 
 for _arg in "$@"; do
     case "$_arg" in
         -y) YES=1 ;;
         --device=*) DEVICE="${_arg#--device=}" ;;
         --hostname=*) HOSTNAME_FLAG="${_arg#--hostname=}" ;;
+        --env-file=*) ENV_FILE="${_arg#--env-file=}" ;;
         -h|--help)
-            echo "Usage: $0 [-y] [--device=/dev/sdX] [--hostname=NAME]"
-            echo "  -y            Skip prompt; sleep 2m with audible alert instead"
-            echo "  --device=     Block device to flash (default: $DEVICE)"
-            echo "  --hostname=   Target hostname (default: $HOSTNAME_FLAG)"
+            echo "Usage: $0 [-y] [--device=/dev/sdX] [--hostname=NAME] [--env-file=FILE]"
+            echo "  -y             Skip prompt; sleep 2m with audible alert instead"
+            echo "  --device=      Block device to flash (overrides auto-detect)"
+            echo "  --hostname=    Target hostname (default: $HOSTNAME_FLAG)"
+            echo "  --env-file=    Env file to source (default: .env)"
             exit 0
             ;;
     esac
 done
 
-# Unified log: all output goes to terminal AND dev-piotbr.log (truncated at start)
+# Source env for SD_CARD_PATHS and other vars before device detection
+if [[ -f "$ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+fi
+
+# ---------------------------------------------------------------------------
+# Device detection: match block device by USB port path (ID_PATH)
+# ---------------------------------------------------------------------------
+find_flash_device() {
+    local allowed="${SD_CARD_PATHS:-}"
+    if [[ -z "$allowed" ]]; then
+        return 1
+    fi
+    while IFS= read -r dev; do
+        local id_path
+        id_path=$(udevadm info "/dev/$dev" 2>/dev/null \
+            | grep -oP '(?<=E: ID_PATH=)\S+' || true)
+        [[ -z "$id_path" ]] && continue
+        for entry in $allowed; do
+            if [[ "$id_path" == "$entry" ]]; then
+                echo "/dev/$dev"
+                return 0
+            fi
+        done
+    done < <(lsblk -dno NAME | grep -E '^sd')
+    return 1
+}
+
+if [[ -z "$DEVICE" ]]; then
+    if ! DEVICE=$(find_flash_device); then
+        echo "ERROR: No whitelisted SD card reader found." >&2
+        echo "  Set SD_CARD_PATHS in your env file, or pass --device=/dev/sdX." >&2
+        echo "" >&2
+        echo "  To find your reader's path (with card inserted):" >&2
+        echo "    udevadm info /dev/sdX | grep ^E:.*ID_PATH=" >&2
+        exit 1
+    fi
+    _dev_info=$(lsblk -dno MODEL,SIZE "$DEVICE" 2>/dev/null | xargs || true)
+    echo "Auto-detected flash device: $DEVICE  ($_dev_info)"
+    if [[ "$YES" -eq 0 ]]; then
+        read -rp "Flash $DEVICE? [y/N] " _confirm
+        [[ "$_confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+    fi
+fi
+
+# Unified log: all output goes to terminal AND dev-piotbr.log (fresh each run)
 exec > >(tee "$LOG") 2>&1
 
 echo "=== run_rpiotbr_cycle.sh $(date '+%Y-%m-%d %H:%M:%S') ==="
@@ -33,7 +82,6 @@ echo ""
 # Phase 1: Flash
 # ---------------------------------------------------------------------------
 echo "--- Phase 1: Flash ---"
-# Source otbrstack.sh to get the otbrstack() function
 # shellcheck source=otbrstack.sh
 source "$SCRIPT_DIR/otbrstack.sh"
 
@@ -47,7 +95,6 @@ echo ""
 # Phase 2: Card transfer
 # ---------------------------------------------------------------------------
 beep_notify() {
-    # Try progressively simpler audio methods
     for _i in 1 2 3; do
         printf '\a'
         sleep 0.4
@@ -57,9 +104,8 @@ beep_notify() {
     elif command -v aplay &>/dev/null; then
         aplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null || true
     fi
-    if command -v spd-say &>/dev/null; then
-        spd-say "Flash complete. Transfer the SD card now." 2>/dev/null || true
-    fi
+    command -v spd-say &>/dev/null \
+        && spd-say "Flash complete. Transfer the SD card now." 2>/dev/null || true
 }
 
 if [[ "$YES" -eq 1 ]]; then
@@ -70,9 +116,9 @@ if [[ "$YES" -eq 1 ]]; then
         sleep 1
     done
     printf "\r  Done.                    \n"
-    # Extra beep to signal countdown finished
     for _i in 1 2; do printf '\a'; sleep 0.3; done
-    command -v spd-say &>/dev/null && spd-say "Time's up. Waiting for SSH." 2>/dev/null || true
+    command -v spd-say &>/dev/null \
+        && spd-say "Time's up. Waiting for SSH." 2>/dev/null || true
 else
     echo "Remove the SD card from the reader, insert it into the Pi, and power it on."
     read -rp "Press Enter when the Pi is booting... "
