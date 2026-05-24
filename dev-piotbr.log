@@ -1,2 +1,6 @@
-[otbrstack] Loading env from /home/derek/projects/otbr_commissioner_stacks/pangolin.env
-[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/projects/otbr_commissioner_stacks)
+=== run_rpiotbr_cycle.sh 2026-05-24 14:13:06 ===
+Device: /dev/sdd  Hostname: dev-piotbr  Skip-prompt: 0
+
+--- Phase 1: Flash ---
+[otbrstack] Loading env from /home/derek/Sync/mini_projects/otbr_commissioner_stacks/pangolin.env
+[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/Sync/mini_projects/otbr_commissioner_stacks)
