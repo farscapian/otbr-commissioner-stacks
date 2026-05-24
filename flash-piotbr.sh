@@ -633,21 +633,41 @@ ${NETPLAN_WIFIS}
       LOG=/var/log/otbr-firstboot.log
       SNAP=openthread-border-router
 
-      log() { printf '[rcp-update] %s\n' "\$*" | tee -a "\$LOG"; }
+      exec >> "\$LOG" 2>&1
+      log() { printf '[rcp-update] %s\n' "\$*"; }
+
+      # Prevent both concurrent and sequential re-runs within the same boot.
+      # flock handles concurrent callers racing; the /run sentinel handles
+      # sequential re-invocations (e.g. systemd Wants= triggering a second run
+      # after otbr-firstboot.sh already called us directly).
+      # /run is a tmpfs cleared on every reboot, so the sentinel is auto-reset.
+      exec 9>/var/lock/otbr-rcp-update.lock
+      if ! flock -n 9; then
+        log "Another instance already running — exiting."
+        exit 0
+      fi
+      _DONE_FLAG=/run/otbr-rcp-update.done
+      if [[ -f "\$_DONE_FLAG" ]]; then
+        log "Already ran this boot — exiting."
+        exit 0
+      fi
+      touch "\$_DONE_FLAG"
+
       log "=== RCP update \$(date) ==="
 
       # Proxy for git/curl — baked in at flash time from HTTP_PROXY env var.
       # git ignores uppercase HTTP_PROXY, so we export the lowercase variants.
       ${HTTP_PROXY:+export http_proxy="${HTTP_PROXY}" https_proxy="${HTTP_PROXY}"}
 
-      # Wait up to 60 s for NTP to sync.  The Pi has no RTC, so its clock
+      # Wait up to 120 s for NTP to sync.  The Pi has no RTC, so its clock
       # starts from fake-hwclock's last saved value.  git ls-remote uses
       # TLS, and TLS cert validation fails when the clock is significantly
-      # wrong.  NTP usually syncs within 10-20 s on a LAN.
-      for _ntp_i in \$(seq 1 20); do
+      # wrong.  WiFi-only boots need extra time: WiFi association + DHCP can
+      # take 30-60 s before NTP has a reachable server.
+      for _ntp_i in \$(seq 1 40); do
         timedatectl show --property=NTPSynchronized --value 2>/dev/null \
           | grep -q yes && break
-        log "Waiting for NTP sync (\${_ntp_i}/20)..."
+        log "Waiting for NTP sync (\${_ntp_i}/40)..."
         sleep 3
       done
 
@@ -713,12 +733,52 @@ ${NETPLAN_WIFIS}
       [Install]
       WantedBy=multi-user.target
 
-  # 9.1.8b Load tun module at boot (required for /dev/net/tun used by otbr-agent).
+  # 9.1.8a Persistent early-boot service: confirm any pending RPi tryboot and
+  #   remove /boot/firmware/new/ so no stale kernel assets survive a reboot.
+  #   Runs on every boot before sysinit.target.  Prevents the unattended-upgrades
+  #   reboot loop: apt-get upgrade → flash-kernel → /new/ → auto-reboot → repeat.
+  - path: /etc/systemd/system/otbr-boot-cleanup.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Confirm Raspberry Pi tryboot and clean up pending boot assets
+      DefaultDependencies=no
+      After=local-fs.target
+      Before=sysinit.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=-/usr/sbin/piboot-try --confirm
+      ExecStart=/bin/rm -rf /boot/firmware/new/
+
+      [Install]
+      WantedBy=sysinit.target
+
+  # 9.1.8b Tell flash-kernel the machine type so it selects the correct Pi 4B
+  #   DTB (bcm2711-rpi-4-b.dtb) instead of guessing Pi 5 when
+  #   /etc/flash-kernel.conf is absent.  Without this, apt-triggered
+  #   initrd rebuilds (dracut + flash-kernel) copy the wrong DTB tree.
+  #   Note: /etc/flash-kernel.conf is the correct override file;
+  #   /etc/default/flash-kernel only sets env vars and doesn't affect MACHINE.
+  - path: /etc/flash-kernel.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      MACHINE="Raspberry Pi 4 Model B"
+
+  # 9.1.8c Load kernel modules at boot.
+  #   tun        — /dev/net/tun used by otbr-agent
+  #   ip_set*    — ipset support required by otbr-setup firewall script
+  #   xt_set     — iptables ipset match used by otbr-setup
   - path: /etc/modules-load.d/otbr.conf
     owner: root:root
     permissions: '0644'
     content: |
       tun
+      ip_set
+      ip_set_hash_net
+      xt_set
 
   # 9.1.9 Drop-in: make the OTBR snap agent wait for RCP firmware update;
   #        disable StartLimitAction=reboot so crashes don't boot-loop the Pi.
@@ -729,7 +789,7 @@ ${NETPLAN_WIFIS}
       [Unit]
       After=otbr-rcp-update.service
       Wants=otbr-rcp-update.service
-      StartLimitBurst=0
+      StartLimitIntervalSec=0
       StartLimitAction=none
 
   # 9.1.10 Weekly reboot timer — triggers RCP firmware check via boot service.
@@ -811,8 +871,13 @@ ${NETPLAN_WIFIS}
       # Packages are pre-installed at flash time via chroot when qemu-user-static
       # is available; these calls are fast no-ops in that case.  They also ensure
       # packages are present when flashing without qemu-user-static.
-      # Stop unattended-upgrades first to avoid dpkg lock contention.
-      systemctl stop unattended-upgrades apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+      # Disable unattended-upgrades permanently on this appliance device.
+      # Kernel upgrades triggered by unattended-upgrades cause flash-kernel to
+      # write to /boot/firmware/new/ and trigger a tryboot reboot loop on the Pi.
+      # We do a controlled upgrade below (first boot only); ongoing kernel updates
+      # are held to prevent this loop.
+      systemctl disable --now unattended-upgrades apt-daily.service apt-daily-upgrade.service \
+        apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
       for _i in \$(seq 1 30); do
         fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
         echo "Waiting for dpkg lock (\${_i}/30)..."
@@ -826,6 +891,14 @@ ${NETPLAN_WIFIS}
       # is often months stale and causes reason -52 channel rejections.
       apt-get install -y --only-upgrade linux-firmware || true
 
+      # Hold kernel packages so no subsequent apt run can upgrade the kernel.
+      # Kernel upgrades trigger flash-kernel → /boot/firmware/new/ → tryboot →
+      # unattended-upgrades auto-reboot → infinite boot loop.
+      apt-mark hold linux-raspi linux-image-raspi linux-headers-raspi 2>/dev/null || true
+      # Belt-and-suspenders: even if unattended-upgrades somehow runs, don't reboot.
+      printf 'Unattended-Upgrade::Automatic-Reboot "false";\n' \
+        > /etc/apt/apt.conf.d/99otbr-no-reboot
+
       # -- Ensure snap is installed -------------------------------------------
       # Stop ModemManager now so it cannot hold ttyACM0 during snap install or
       # the interface-connect restarts that follow.  The mask (from runcmd)
@@ -834,37 +907,43 @@ ${NETPLAN_WIFIS}
       systemctl stop ModemManager 2>/dev/null || true
 
       # Try the pre-loaded /opt/otbr-snap/ file first (installed with
-      # --dangerous since arm64 snap-revision assertions are not publicly
-      # fetchable).  Falls back to snap store on failure.
+      # --dangerous --devmode: arm64 revision assertions aren't publicly
+      # fetchable, and the thread-reference edge build lacks firewall-control /
+      # network-control plugs so its AppArmor profile never gets CAP_NET_ADMIN.
+      # --devmode puts AppArmor into complain mode so ip6tables and ipset work.
       if ! snap list "\$SNAP" &>/dev/null; then
         _snap_file=\$(ls /opt/otbr-snap/*.snap 2>/dev/null | head -1)
         if [[ -n "\$_snap_file" ]]; then
           echo "Installing \$SNAP from pre-loaded file: \$(basename "\$_snap_file")"
-          snap install --dangerous "\$_snap_file" || true
+          snap install --dangerous --devmode "\$_snap_file" || true
           snap switch "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} 2>/dev/null || true
         fi
       fi
       if ! snap list "\$SNAP" &>/dev/null; then
         echo "\$SNAP not yet installed — installing from store ..."
         for _i in \$(seq 1 5); do
-          snap install "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} && break
+          snap install "\$SNAP" --channel=${OTBR_SNAP_CHANNEL} --devmode && break
           echo "Snap install attempt \$_i failed; retrying in 15s ..."
           sleep 15
         done
       fi
 
       # -- Disable snap before connecting interfaces --------------------------
-      # snap disable stops all services and tells snapd not to restart them
-      # during subsequent snap connect calls.  This is the clean way to hold
-      # the snap idle while we configure interfaces and flash the RCP.
-      # snap enable + snap start below brings it up once everything is ready.
+      # snap disable prevents services from auto-restarting during snap connect
+      # calls.  snap enable is called below — before any snap set — so the
+      # configure hook can find /snap/<snap>/current.  snap start brings up the
+      # agent once all settings are in place.
       snap disable "\${SNAP}" 2>/dev/null || true
 
       # -- Connect interfaces ------------------------------------------------
-      snap connect "\${SNAP}:firewall-control" || true
-      snap connect "\${SNAP}:network-control"  || true
-      snap connect "\${SNAP}:raw-usb"          || true
-      snap connect "\${SNAP}:avahi-control"    || true
+      # Dynamically connect every plug the snap exposes that is not yet
+      # connected.  This adapts to whatever plug names the installed snap
+      # version actually declares, avoiding "no plug named X" noise.
+      while IFS= read -r _plug; do
+        [[ -n "\$_plug" ]] || continue
+        snap connect "\${SNAP}:\${_plug}" 2>/dev/null || true
+      done < <(snap connections --all "\${SNAP}" 2>/dev/null \
+        | awk 'NR>1 && \$3=="-" {split(\$2,a,":"); if (a[2]!="") print a[2]}')
 
       # -- Install chip-tool (Matter commissioning — BLE+Thread and Thread-only)
       if ! snap list chip-tool &>/dev/null; then
@@ -876,6 +955,13 @@ ${NETPLAN_WIFIS}
         fi
         unset _ct_file
       fi
+
+      # -- Re-enable snap so the configure hook can find /snap/<name>/current --
+      # snap set (below and inside rcp-update.sh) triggers the configure hook;
+      # the hook uses readlink /snap/<name>/current which only exists while the
+      # snap is enabled.  Enabling here is safe: autostart=false (set by the
+      # install hook) keeps all services stopped until we explicitly start them.
+      snap enable "\${SNAP}" 2>/dev/null || true
 
       # -- Update/flash RCP firmware; sets snap radio-url ------------------
       mkdir -p /var/lib/otbr
@@ -891,22 +977,39 @@ ${NETPLAN_WIFIS}
         echo "Backbone interface: \$INFRA"
 
         # -- Configure snap (radio-url already set by otbr-rcp-update.sh) --
+        # autostart=true triggers the configure hook to start the agent; by
+        # this point radio-url and infra-if are both configured.
         snap set "\$SNAP" \
           infra-if="\$INFRA" \
           thread-if=wpan0 \
           autostart=true
 
-        # -- Re-enable and start the snap service ---------------------------
-        snap enable "\$SNAP"
+        # -- Ensure ipset kernel modules are loaded before snap start ---------
+        # otbr-setup (a snap service dependency) uses ipset to manage firewall
+        # rules; it fails with "Cannot open session to kernel" if ip_set isn't
+        # loaded.  modules-load.d handles subsequent boots; modprobe covers the
+        # first boot before systemd-modules-load has run those rules.
+        modprobe ip_set ip_set_hash_net xt_set 2>/dev/null || true
+
+        # -- Start the snap service ------------------------------------------
         snap start --enable "\$SNAP"
 
         # -- Start interface watcher for immediate eth0/wlan0 failover ------
         systemctl start otbr-ifwatcher.service || true
 
         # -- Seed Thread dataset ---------------------------------------------
-        # Wait up to 30 s for the agent socket to appear
-        for i in \$(seq 1 30); do
-          "\$SNAP".ot-ctl state 2>/dev/null && break || sleep 1
+        # Wait up to 60 s for the agent socket AND its settings storage.
+        # The socket becomes ready almost immediately, but the agent may not
+        # have finished initialising its on-disk settings db yet.  Committing
+        # a dataset before the db is ready returns "Done" but writes nothing.
+        # We detect readiness by waiting for the settings data file to appear
+        # in the snap's common directory (it is created on first write).
+        _SETTINGS_DIR=/var/snap/openthread-border-router/common/thread-data
+        for i in \$(seq 1 60); do
+          "\$SNAP".ot-ctl state 2>/dev/null \
+            && [[ \$(ls "\$_SETTINGS_DIR"/*.data 2>/dev/null | wc -l) -ge 1 ]] \
+            && break
+          sleep 1
         done
 
         echo "Committing Thread dataset TLV ..."
@@ -914,6 +1017,16 @@ ${NETPLAN_WIFIS}
         "\$SNAP".ot-ctl dataset commit active
         "\$SNAP".ot-ctl ifconfig up
         "\$SNAP".ot-ctl thread start
+
+        # Verify the dataset landed on disk.
+        if [[ \$(ls "\$_SETTINGS_DIR"/*.data 2>/dev/null | wc -l) -lt 2 ]]; then
+          echo "WARNING: dataset may not have persisted — retrying after 5 s ..."
+          sleep 5
+          "\$SNAP".ot-ctl dataset set active "\$TLV"
+          "\$SNAP".ot-ctl dataset commit active
+          "\$SNAP".ot-ctl ifconfig up
+          "\$SNAP".ot-ctl thread start
+        fi
       else
         echo "WARNING: \$SNAP not installed — skipping OTBR configuration."
         echo "         Re-run /usr/local/sbin/otbr-firstboot.sh once the snap store is reachable."
@@ -942,16 +1055,13 @@ ${NETPLAN_WIFIS}
       ufw --force enable
       echo "UFW enabled."
 
-      echo "OTBR first-boot complete."
+      # Clean up any tryboot assets flash-kernel may have written to
+      # /boot/firmware/new/ during the apt-triggered dracut/flash-kernel run.
+      # Without piboot-try, those files would never be applied and only
+      # cause a stale-assets MOTD banner on subsequent logins.
+      rm -rf /boot/firmware/new/ 2>/dev/null || true
 
-      # -- Apply pending boot assets (Ubuntu kernel/firmware updates) --------
-      # piboot-try uses Ubuntu's tryboot mechanism: if untested assets are in
-      # /boot/firmware/new, a reboot is needed to test them. Do it now rather
-      # than leaving the banner on every login.
-      if [[ -d /boot/firmware/new ]] && command -v piboot-try &>/dev/null; then
-        echo "Pending boot assets detected — rebooting to apply (piboot-try)."
-        piboot-try --reboot
-      fi
+      echo "OTBR first-boot complete."
 
 # --------------------------------------------------------------------------
 # 9.3 runcmd — executes after write_files and snap modules
@@ -968,6 +1078,7 @@ runcmd:
 
   # Enable and start the interface watcher
   - systemctl daemon-reload
+  - systemctl enable otbr-boot-cleanup.service
   - systemctl enable otbr-ifwatcher.service
   - systemctl enable otbr-rcp-update.service
   - systemctl enable otbr-weekly-reboot.timer
@@ -1032,7 +1143,15 @@ else
         info "Mounted root partition $_ROOT_PART — writing kernel config..."
         sudo mkdir -p \
             "$_ROOT_DIR/etc/modprobe.d" \
+            "$_ROOT_DIR/etc/modules-load.d" \
             "$_ROOT_DIR/etc/udev/rules.d"
+
+        sudo tee "$_ROOT_DIR/etc/modules-load.d/otbr.conf" > /dev/null <<'MODULES'
+tun
+ip_set
+ip_set_hash_net
+xt_set
+MODULES
 
         sudo tee "$_ROOT_DIR/etc/modprobe.d/brcmfmac.conf" > /dev/null <<'BRCM'
 options brcmfmac roamoff=1 feature_disable=0x82000
@@ -1048,11 +1167,32 @@ ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set 
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", RUN+="/usr/sbin/iw dev %k set power_save off"
 UDEV
 
+        # flash-kernel machine type — prevents it from guessing Pi 5 DTB when
+        # the file is absent (happens on apt upgrade → dracut → flash-kernel).
+        # /etc/flash-kernel.conf is the correct override; /etc/default/flash-kernel
+        # only sets env vars and doesn't affect machine detection.
+        sudo mkdir -p "$_ROOT_DIR/etc"
+        printf 'MACHINE="Raspberry Pi 4 Model B"\n' \
+            | sudo tee "$_ROOT_DIR/etc/flash-kernel.conf" > /dev/null
+        info "Written /etc/flash-kernel.conf (MACHINE=Raspberry Pi 4 Model B)"
+
         # Pre-load development assets so the Pi doesn't need to download them
         # on first boot.  All sections are conditional — skipped if not cached.
         # Only done on a full flash; cloud-init-only updates leave the live Pi
         # filesystem alone.
         if [[ "$CLOUD_INIT_ONLY" -eq 0 ]]; then
+
+            # ------------------------------------------------------------------
+            # Seed /var/log/otbr-firstboot.log so it exists from first insert.
+            # otbr-firstboot.sh opens it with exec >>; having it pre-created
+            # means `tail -f` works immediately without waiting for the script
+            # to run.
+            # ------------------------------------------------------------------
+            sudo mkdir -p "$_ROOT_DIR/var/log"
+            printf '=== otbr-firstboot.log created at flash time: %s ===\n=== insert SD card and power on — first-boot provisioning will begin shortly ===\n' \
+                "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
+                | sudo tee "$_ROOT_DIR/var/log/otbr-firstboot.log" > /dev/null
+            info "Seeded /var/log/otbr-firstboot.log on root partition."
 
             # ------------------------------------------------------------------
             # Update (or clone) ESP-IDF cache so the pre-seeded SD card has
@@ -1409,6 +1549,6 @@ if [[ -n "${_HOSTNAME_CLI:-}" ]]; then
 else
     info " SSH:  ssh ubuntu@<pi-ip>  (or: ssh ${OTBR_HOSTNAME} if DNS/mDNS resolves)"
 fi
-info " Logs: /var/log/otbr-firstboot.log"
+info " Logs: otbrstack logs -f ${OTBR_HOSTNAME}"
 info " Cloud-init: sudo cloud-init status --long"
 info "============================================================"

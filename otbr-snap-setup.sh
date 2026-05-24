@@ -319,7 +319,7 @@ configure_otbr() {
     # Install snap if not present
     if ! snap list openthread-border-router &>/dev/null; then
         log "openthread-border-router snap not installed — installing..."
-        sudo snap install openthread-border-router --channel=latest/edge
+        sudo snap install openthread-border-router --channel=latest/edge --devmode
         changed=1
     fi
 

@@ -54,6 +54,13 @@ otbrstack() {
         # GitHub and other TLS endpoints routed through the Squid CONNECT tunnel.
         if [[ -n "${HTTP_PROXY:-}" ]]; then
             export http_proxy="$HTTP_PROXY" https_proxy="$HTTP_PROXY"
+            local _proxy_hostport="${HTTP_PROXY#*://}"   # strip scheme
+            _proxy_hostport="${_proxy_hostport%/}"        # strip trailing slash
+            if command -v wait-for-it &>/dev/null; then
+                if ! wait-for-it --timeout=5 "$_proxy_hostport" -- true 2>/dev/null; then
+                    echo "[otbrstack] WARNING: HTTP proxy ${_proxy_hostport} is not reachable; network operations may fail" >&2
+                fi
+            fi
         fi
     fi
 
@@ -157,21 +164,39 @@ otbrstack() {
                 ssh -t "$_host" '
                     _cleanup() { kill $(jobs -p) 2>/dev/null; }
                     trap _cleanup EXIT INT TERM
-                    # journalctl includes kernel (dmesg), systemd, snap, and
-                    # cloud-init messages in one interleaved timestamped stream.
-                    sudo journalctl -f -o short-iso --no-pager -n 200 &
-                    # otbr-firstboot.log is written directly to file (not via
-                    # journald), so tail it separately.
-                    sudo tail -f /var/log/otbr-firstboot.log 2>/dev/null &
+                    sudo journalctl -f -k --no-pager -o short-iso \
+                        | sed "s/^/[dmesg] /" &
+                    sudo journalctl -f -u "cloud-init*" --no-pager -o short-iso \
+                        | sed "s/^/[cloud-init] /" &
+                    sudo journalctl -f -u "snap.openthread-border-router.*" --no-pager -o short-iso \
+                        | sed "s/^/[otbr-snap] /" &
+                    sudo journalctl -f -u "snap.chiptool.*" --no-pager -o short-iso \
+                        | sed "s/^/[chiptool] /" &
+                    sudo tail -f /var/log/otbr-firstboot.log 2>/dev/null \
+                        | sed "s/^/[firstboot] /" &
                     wait
                 '
             else
                 ssh "$_host" '
-                    echo "=== last-boot journal (kernel + systemd + snap) ==="
-                    sudo journalctl -b -o short-iso --no-pager -n 300
-                    echo
-                    echo "=== /var/log/otbr-firstboot.log ==="
-                    sudo tail -n 80 /var/log/otbr-firstboot.log 2>/dev/null || true
+                    _section() { echo; echo "=== [$1] ==="; }
+                    _section "dmesg"
+                    sudo journalctl -b -k --no-pager -o short-iso \
+                        | sed "s/^/[dmesg] /"
+                    _section "cloud-init"
+                    sudo journalctl -b -u "cloud-init*" --no-pager -o short-iso \
+                        | sed "s/^/[cloud-init] /"
+                    _section "otbr-snap"
+                    sudo journalctl -b -u "snap.openthread-border-router.*" --no-pager -o short-iso \
+                        | sed "s/^/[otbr-snap] /"
+                    _section "chiptool"
+                    sudo journalctl -b -u "snap.chiptool.*" --no-pager -o short-iso \
+                        | sed "s/^/[chiptool] /"
+                    _section "firstboot"
+                    if [[ -f /var/log/otbr-firstboot.log ]]; then
+                        sed "s/^/[firstboot] /" /var/log/otbr-firstboot.log
+                    else
+                        echo "[firstboot] /var/log/otbr-firstboot.log not found"
+                    fi
                 '
             fi
             ;;

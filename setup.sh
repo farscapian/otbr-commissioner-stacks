@@ -61,6 +61,13 @@ install_apt_packages() {
 
     echo "   Missing: ${missing[*]}"
     if [[ -n "${HTTP_PROXY:-}" ]]; then
+        local _proxy_hostport="${HTTP_PROXY#*://}"
+        _proxy_hostport="${_proxy_hostport%/}"
+        if command -v wait-for-it &>/dev/null; then
+            if ! wait-for-it --timeout=5 "$_proxy_hostport" -- true 2>/dev/null; then
+                warn "HTTP proxy ${_proxy_hostport} is not reachable; apt may fail"
+            fi
+        fi
         echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" \
             | sudo tee /etc/apt/apt.conf.d/90apt-cache >/dev/null
     fi
