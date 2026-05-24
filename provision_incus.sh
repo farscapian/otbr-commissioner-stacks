@@ -500,9 +500,9 @@ step "Creating Incus $INSTANCE_MODE ($INSTANCE_ARCH): $INSTANCE_NAME"
 TYPE_FLAG="$([[ $INSTANCE_MODE == vm ]] && echo "--vm" || echo "")"
 
 if [[ "$INSTANCE_ARCH" == "arm64" ]]; then
-    INCUS_IMAGE="ubuntu:26.04/arm64"
+    INCUS_IMAGE="images:ubuntu/26.04/arm64"
 else
-    INCUS_IMAGE="ubuntu:26.04"
+    INCUS_IMAGE="images:ubuntu/26.04"
 fi
 
 # shellcheck disable=SC2086
