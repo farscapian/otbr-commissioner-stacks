@@ -967,8 +967,11 @@ ${NETPLAN_WIFIS}
       mkdir -p /var/lib/otbr
       /usr/local/sbin/otbr-rcp-update.sh
 
-      # -- Snap-dependent setup (skip if snap install failed) ---------------
+      # -- Snap-dependent pre-start setup (skip if snap install failed) -------
+      _snap_ok=0
       if snap list "\$SNAP" &>/dev/null; then
+        _snap_ok=1
+
         # -- Determine backbone interface ------------------------------------
         INFRA=wlan0
         if ip link show eth0 2>/dev/null | grep -q 'LOWER_UP'; then
@@ -977,12 +980,12 @@ ${NETPLAN_WIFIS}
         echo "Backbone interface: \$INFRA"
 
         # -- Configure snap (radio-url already set by otbr-rcp-update.sh) --
-        # autostart=true triggers the configure hook to start the agent; by
-        # this point radio-url and infra-if are both configured.
+        # autostart=false keeps the configure hook from starting the agent here;
+        # we start it explicitly after UFW is up and the dataset is committed.
         snap set "\$SNAP" \
           infra-if="\$INFRA" \
           thread-if=wpan0 \
-          autostart=true
+          autostart=false
 
         # -- Ensure ipset kernel modules are loaded before snap start ---------
         # otbr-setup (a snap service dependency) uses ipset to manage firewall
@@ -990,49 +993,12 @@ ${NETPLAN_WIFIS}
         # loaded.  modules-load.d handles subsequent boots; modprobe covers the
         # first boot before systemd-modules-load has run those rules.
         modprobe ip_set ip_set_hash_net xt_set 2>/dev/null || true
-
-        # -- Start the snap service ------------------------------------------
-        snap start --enable "\$SNAP"
-
-        # -- Start interface watcher for immediate eth0/wlan0 failover ------
-        systemctl start otbr-ifwatcher.service || true
-
-        # -- Seed Thread dataset ---------------------------------------------
-        # Wait up to 60 s for the agent socket AND its settings storage.
-        # The socket becomes ready almost immediately, but the agent may not
-        # have finished initialising its on-disk settings db yet.  Committing
-        # a dataset before the db is ready returns "Done" but writes nothing.
-        # We detect readiness by waiting for the settings data file to appear
-        # in the snap's common directory (it is created on first write).
-        _SETTINGS_DIR=/var/snap/openthread-border-router/common/thread-data
-        for i in \$(seq 1 60); do
-          "\$SNAP".ot-ctl state 2>/dev/null \
-            && [[ \$(ls "\$_SETTINGS_DIR"/*.data 2>/dev/null | wc -l) -ge 1 ]] \
-            && break
-          sleep 1
-        done
-
-        echo "Committing Thread dataset TLV ..."
-        "\$SNAP".ot-ctl dataset set active "\$TLV"
-        "\$SNAP".ot-ctl dataset commit active
-        "\$SNAP".ot-ctl ifconfig up
-        "\$SNAP".ot-ctl thread start
-
-        # Verify the dataset landed on disk.
-        if [[ \$(ls "\$_SETTINGS_DIR"/*.data 2>/dev/null | wc -l) -lt 2 ]]; then
-          echo "WARNING: dataset may not have persisted — retrying after 5 s ..."
-          sleep 5
-          "\$SNAP".ot-ctl dataset set active "\$TLV"
-          "\$SNAP".ot-ctl dataset commit active
-          "\$SNAP".ot-ctl ifconfig up
-          "\$SNAP".ot-ctl thread start
-        fi
       else
         echo "WARNING: \$SNAP not installed — skipping OTBR configuration."
         echo "         Re-run /usr/local/sbin/otbr-firstboot.sh once the snap store is reachable."
       fi
 
-      # -- Configure UFW firewall --------------------------------------------
+      # -- Configure UFW firewall (always runs, before snap starts) ----------
       ufw --force reset
       ufw default deny incoming
       ufw default allow outgoing
@@ -1054,6 +1020,58 @@ ${NETPLAN_WIFIS}
       ufw allow in on wpan0 comment 'Thread mesh (wpan0)'
       ufw --force enable
       echo "UFW enabled."
+
+      # -- Start snap service (last step — firewall is up before snap runs) --
+      if [[ "\$_snap_ok" -eq 1 ]]; then
+        snap start --enable "\$SNAP"
+
+        # -- Start interface watcher for immediate eth0/wlan0 failover ------
+        systemctl start otbr-ifwatcher.service || true
+
+        # -- Seed Thread dataset ---------------------------------------------
+        # Wait up to 60 s for the agent socket AND its settings storage.
+        # The socket becomes ready almost immediately, but the agent may not
+        # have finished initialising its on-disk settings db yet.  Committing
+        # a dataset before the db is ready returns "Done" but writes nothing.
+        # We detect readiness by waiting for the settings data file to appear
+        # in the snap's common directory (it is created on first write).
+        _SETTINGS_DIR=/var/snap/openthread-border-router/common/thread-data
+        for i in \$(seq 1 60); do
+          "\$SNAP".ot-ctl state 2>/dev/null \
+            && [[ \$(ls "\$_SETTINGS_DIR"/*.data 2>/dev/null | wc -l) -ge 1 ]] \
+            && break
+          sleep 1
+        done
+
+        # -- Clear any stale TLVs cached in RCP NVM before committing dataset --
+        echo "Factory-resetting RCP to clear cached TLVs ..."
+        "\$SNAP".ot-ctl factoryreset || true
+        # Agent reconnects to RCP after reset; wait for it to be ready again.
+        for i in \$(seq 1 30); do
+          "\$SNAP".ot-ctl state 2>/dev/null && break
+          sleep 2
+        done
+
+        echo "Committing Thread dataset TLV ..."
+        "\$SNAP".ot-ctl dataset set active "\$TLV"
+        "\$SNAP".ot-ctl dataset commit active
+        "\$SNAP".ot-ctl ifconfig up
+        "\$SNAP".ot-ctl thread start
+
+        # Verify the dataset landed on disk.
+        if [[ \$(ls "\$_SETTINGS_DIR"/*.data 2>/dev/null | wc -l) -lt 2 ]]; then
+          echo "WARNING: dataset may not have persisted — retrying after 5 s ..."
+          sleep 5
+          "\$SNAP".ot-ctl dataset set active "\$TLV"
+          "\$SNAP".ot-ctl dataset commit active
+          "\$SNAP".ot-ctl ifconfig up
+          "\$SNAP".ot-ctl thread start
+        fi
+
+        # Dataset is committed and interface is up — now enable autostart so
+        # subsequent boots bring the agent up automatically via snapd.
+        snap set "\$SNAP" autostart=true
+      fi
 
       # Clean up any tryboot assets flash-kernel may have written to
       # /boot/firmware/new/ during the apt-triggered dracut/flash-kernel run.
