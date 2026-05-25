@@ -1054,16 +1054,16 @@ ${NETPLAN_WIFIS}
 
         echo "Committing Thread dataset TLV ..."
         "\$SNAP".ot-ctl dataset set active "\$TLV"
-        "\$SNAP".ot-ctl dataset commit active
         "\$SNAP".ot-ctl ifconfig up
         "\$SNAP".ot-ctl thread start
 
-        # Verify the dataset landed on disk.
-        if [[ \$(ls "\$_SETTINGS_DIR"/*.data 2>/dev/null | wc -l) -lt 2 ]]; then
-          echo "WARNING: dataset may not have persisted — retrying after 5 s ..."
+        # Verify the dataset landed: read it back and compare the TLV.
+        _readback=\$("\$SNAP".ot-ctl dataset active -x 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)
+        _expected=\$(echo "\$TLV" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        if [[ "\$_readback" != "\$_expected" ]]; then
+          echo "WARNING: dataset readback mismatch — retrying after 5 s ..."
           sleep 5
           "\$SNAP".ot-ctl dataset set active "\$TLV"
-          "\$SNAP".ot-ctl dataset commit active
           "\$SNAP".ot-ctl ifconfig up
           "\$SNAP".ot-ctl thread start
         fi
