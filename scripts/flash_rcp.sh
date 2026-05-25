@@ -136,6 +136,16 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# 1.5. Ensure ESP-IDF tools (Python venv + toolchains) are installed.
+#      PULL_LATEST_REPOS=0 skips install.sh; run it here when the venv is
+#      absent so that export.sh succeeds on SKIP_CHROOT=1 flash targets.
+# ---------------------------------------------------------------------------
+if ! ls "${IDF_TOOLS_PATH}/python_env"/*/bin/python3 &>/dev/null; then
+    log "ESP-IDF Python venv not found — running install.sh esp32c6 (one-time setup) ..."
+    "${IDF_DIR}/install.sh" esp32c6
+fi
+
 _ot_rcp_dir="${IDF_DIR}/examples/openthread/ot_rcp"
 [[ -d "$_ot_rcp_dir" ]] || die "ot_rcp example not found at $_ot_rcp_dir"
 
