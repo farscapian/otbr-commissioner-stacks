@@ -4,3 +4,20 @@ Device: /dev/sdd  Hostname: dev-piotbr  Skip-prompt: 0
 --- Phase 1: Flash ---
 [otbrstack] Loading env from /home/derek/Sync/mini_projects/otbr_commissioner_stacks/pangolin.env
 [otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/Sync/mini_projects/otbr_commissioner_stacks)
+[main d3b913c] TEMP: pre-flash snapshot 2026-05-24 18:58:41
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+Preparing worktree (new branch 'flash/20260524-185841')
+HEAD is now at d3b913c TEMP: pre-flash snapshot 2026-05-24 18:58:41
+[otbrstack] Running flash from worktree: /tmp/tmp.jbfL7R2MXT-otbrstack-flash
+[otbrstack] Main working tree remains editable on its current branch.
+[0;32m[INFO][0m  SSH config entry found for 'dev-piotbr'.
+[0;32m[INFO][0m  Target: /dev/sdd
+NAME  SIZE TYPE MOUNTPOINT
+sdd  29.7G disk 
+
+[1;33m[WARN][0m  Skipping confirmation (-y). ALL DATA ON /dev/sdd WILL BE DESTROYED.
+[1;33m[WARN][0m  SKIP_IMAGE_VERIFICATION=1 — skipping download, SHA-256, and size check.
+[0;32m[INFO][0m  Flashing to /dev/sdd ...
+2055208960 bytes (2.1 GB, 1.9 GiB) copied, 1.00034 s, 2.1 GB/s4114612224 bytes (4.1 GB, 3.8 GiB) copied, 2.00192 s, 2.1 GB/sdd: IO error: Input/output error
+[otbrstack] Loading env from /home/derek/projects/otbr_commissioner_stacks/pangolin.env
+[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/projects/otbr_commissioner_stacks)
