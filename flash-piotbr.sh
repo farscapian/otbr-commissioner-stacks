@@ -1292,6 +1292,10 @@ UDEV
             # the host cache and pre-seeds the SD card so the Pi skips the
             # build entirely on first boot.
             # ------------------------------------------------------------------
+            if [[ "${SKIP_CHROOT:-0}" -eq 1 ]]; then
+                info "SKIP_CHROOT=1 — skipping arm64 chroot; first-boot will handle apt packages."
+            else
+
             _do_rcp_build=0
             if [[ ! -f "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" ]]; then
                 if [[ -d "$_ROOT_DIR/opt/esp-idf" ]]; then
@@ -1426,6 +1430,8 @@ CHROOTSCRIPT
                 warn "RCP build was requested but binary not found — Pi will build on first boot."
             fi
             unset _built_bin _do_rcp_build
+
+            fi  # SKIP_CHROOT
 
             # ------------------------------------------------------------------
             # Download arm64 snaps from Snap Store REST API.
