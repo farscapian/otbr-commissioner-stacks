@@ -66,16 +66,70 @@ otbrstack() {
 
     case "$cmd" in
         vm)
+            if ! command -v incus &>/dev/null; then
+                echo "[otbrstack] incus not found — running setup.sh to install and initialize it ..."
+                bash "$_OTBRSTACK_DIR/setup.sh"
+                if ! command -v incus &>/dev/null; then
+                    echo "[otbrstack] ERROR: incus still not available after setup. Aborting." >&2
+                    return 1
+                fi
+            fi
+
+            # Detect if incus-admin group membership exists in /etc/group but is
+            # not yet active in this session (happens right after usermod -aG).
+            local _use_sg=0
+            if ! incus info &>/dev/null 2>&1; then
+                if getent group incus-admin 2>/dev/null | grep -qw "$USER"; then
+                    echo "[otbrstack] NOTE: ${USER} is in the incus-admin group but it is not active" \
+                         "in this shell session (group was added this run or before a re-login)." >&2
+                    echo "[otbrstack] Using 'sg incus-admin' to activate the group for this command." \
+                         "Open a new terminal after this to avoid the message in future runs." >&2
+                    _use_sg=1
+                else
+                    echo "[otbrstack] ERROR: cannot reach incus daemon and ${USER} is not in incus-admin." \
+                         "Run setup.sh first." >&2
+                    return 1
+                fi
+            fi
+
             local _arch="${_pass_args[0]:-}"
             local _vm_args=("${_pass_args[@]:1}")
+
+            # Determine instance name for log file (mirrors provision_incus.sh defaults).
+            local _vm_log_name="otbrvm64"
+            if [[ "$_arch" == "arm64" || "$_arch" == "aarch64" ]]; then
+                _vm_log_name="otbrarm64"
+            fi
+            for _a in "${_vm_args[@]+"${_vm_args[@]}"}"; do
+                case "$_a" in
+                    --container) _vm_log_name="otbr-ct" ;;
+                    --name=*)    _vm_log_name="${_a#--name=}" ;;
+                esac
+            done
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_vm_log_name}.log"
+            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            echo "[otbrstack] Logging to: ${_otbr_log}"
+
             case "$_arch" in
                 x64|x86_64)
                     echo "[otbrstack] Incus VM (native x86_64)  (scripts: ${_OTBRSTACK_DIR})"
-                    "$_OTBRSTACK_DIR/provision_incus.sh" "${_vm_args[@]+"${_vm_args[@]}"}"
+                    {
+                        if [[ "$_use_sg" -eq 1 ]]; then
+                            sg incus-admin -c "\"$_OTBRSTACK_DIR/provision_incus.sh\" ${_vm_args[*]+"${_vm_args[*]}"}"
+                        else
+                            "$_OTBRSTACK_DIR/provision_incus.sh" "${_vm_args[@]+"${_vm_args[@]}"}"
+                        fi
+                    } 2>&1 | tee -a "$_otbr_log"
                     ;;
                 arm64|aarch64)
                     echo "[otbrstack] Incus VM (arm64)  (scripts: ${_OTBRSTACK_DIR})"
-                    "$_OTBRSTACK_DIR/provision_incus.sh" --arch=arm64 "${_vm_args[@]+"${_vm_args[@]}"}"
+                    {
+                        if [[ "$_use_sg" -eq 1 ]]; then
+                            sg incus-admin -c "\"$_OTBRSTACK_DIR/provision_incus.sh\" --arch=arm64 ${_vm_args[*]+"${_vm_args[*]}"}"
+                        else
+                            "$_OTBRSTACK_DIR/provision_incus.sh" --arch=arm64 "${_vm_args[@]+"${_vm_args[@]}"}"
+                        fi
+                    } 2>&1 | tee -a "$_otbr_log"
                     ;;
                 *)
                     echo "Usage: otbrstack vm <x64|arm64> [extra args]"
@@ -85,6 +139,16 @@ otbrstack() {
             ;;
         flash)
             echo "[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: ${_OTBRSTACK_DIR})"
+
+            # Determine log file from --hostname= flag.
+            local _flash_log_host="otbr"
+            for _a in "${_pass_args[@]+"${_pass_args[@]}"}"; do
+                case "$_a" in --hostname=*) _flash_log_host="${_a#--hostname=}" ;; esac
+            done
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_flash_log_host}.log"
+            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            echo "[otbrstack] Logging to: ${_otbr_log}"
+
             # Commit any pending changes to the current branch first.
             (
                 cd "$_OTBRSTACK_DIR"
@@ -110,8 +174,9 @@ otbrstack() {
             done
             echo "[otbrstack] Running flash from worktree: ${_flash_wt}"
             echo "[otbrstack] Main working tree remains editable on its current branch."
-            "$_flash_wt/flash-piotbr.sh" "${_pass_args[@]+"${_pass_args[@]}"}"
-            local _flash_rc=$?
+            { "$_flash_wt/flash-piotbr.sh" "${_pass_args[@]+"${_pass_args[@]}"}"; } 2>&1 \
+                | tee -a "$_otbr_log"
+            local _flash_rc="${PIPESTATUS[0]}"
             git -C "$_OTBRSTACK_DIR" worktree remove --force "$_flash_wt" \
                 || sudo rm -rf "$_flash_wt"
             git -C "$_OTBRSTACK_DIR" worktree prune 2>/dev/null || true
@@ -123,11 +188,19 @@ otbrstack() {
             ;;
         docker)
             echo "[otbrstack] Docker bare-metal provisioner"
-            "$_OTBRSTACK_DIR/otbr-docker-setup.sh" "${_pass_args[@]+"${_pass_args[@]}"}"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/$(hostname).log"
+            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            echo "[otbrstack] Logging to: ${_otbr_log}"
+            { "$_OTBRSTACK_DIR/otbr-docker-setup.sh" "${_pass_args[@]+"${_pass_args[@]}"}"; } 2>&1 \
+                | tee -a "$_otbr_log"
             ;;
         snap)
             echo "[otbrstack] Snap bare-metal provisioner"
-            "$_OTBRSTACK_DIR/otbr-snap-setup.sh" "${_pass_args[@]+"${_pass_args[@]}"}"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/$(hostname).log"
+            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            echo "[otbrstack] Logging to: ${_otbr_log}"
+            { "$_OTBRSTACK_DIR/otbr-snap-setup.sh" "${_pass_args[@]+"${_pass_args[@]}"}"; } 2>&1 \
+                | tee -a "$_otbr_log"
             ;;
         shutdown)
             local _host="${_pass_args[0]:-}"
@@ -159,8 +232,32 @@ otbrstack() {
                 echo "Usage: otbrstack logs [-f] <ssh_host>"
                 return 1
             fi
-            echo "[otbrstack] Logs from ${_host}"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_host}.log"
+            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            echo "[otbrstack] Logs from ${_host} (appending to: ${_otbr_log})"
             if [[ "$_follow" -eq 1 ]]; then
+                local _ssh_target
+                _ssh_target=$(ssh -G "$_host" 2>/dev/null | awk '/^hostname / {print $2; exit}')
+                _ssh_target="${_ssh_target:-$_host}"
+                echo "[otbrstack] Waiting for SSH on ${_ssh_target}:22 (timeout 300s) ..."
+                if command -v wait-for-it &>/dev/null; then
+                    if ! wait-for-it --timeout=300 "${_ssh_target}:22"; then
+                        echo "[otbrstack] ERROR: ${_ssh_target}:22 did not become available." >&2
+                        return 1
+                    fi
+                else
+                    local _deadline=$(( $(date +%s) + 300 ))
+                    while [[ $(date +%s) -lt $_deadline ]]; do
+                        nc -z -w3 "$_ssh_target" 22 2>/dev/null && break
+                        printf '.'
+                        sleep 5
+                    done
+                    echo ""
+                    if ! nc -z -w3 "$_ssh_target" 22 2>/dev/null; then
+                        echo "[otbrstack] ERROR: ${_ssh_target}:22 did not become available." >&2
+                        return 1
+                    fi
+                fi
                 ssh -t "$_host" '
                     _cleanup() { kill $(jobs -p) 2>/dev/null; }
                     trap _cleanup EXIT INT TERM
@@ -168,14 +265,14 @@ otbrstack() {
                         | sed "s/^/[dmesg] /" &
                     sudo journalctl -f -u "cloud-init*" --no-pager -o short-iso \
                         | sed "s/^/[cloud-init] /" &
-                    sudo journalctl -f -u "snap.openthread-border-router.*" --no-pager -o short-iso \
+                    sudo snap logs -f openthread-border-router \
                         | sed "s/^/[otbr-snap] /" &
                     sudo journalctl -f -u "snap.chiptool.*" --no-pager -o short-iso \
                         | sed "s/^/[chiptool] /" &
                     sudo tail -f /var/log/otbr-firstboot.log 2>/dev/null \
                         | sed "s/^/[firstboot] /" &
                     wait
-                '
+                ' | tee -a "$_otbr_log"
             else
                 ssh "$_host" '
                     _section() { echo; echo "=== [$1] ==="; }
@@ -186,7 +283,7 @@ otbrstack() {
                     sudo journalctl -b -u "cloud-init*" --no-pager -o short-iso \
                         | sed "s/^/[cloud-init] /"
                     _section "otbr-snap"
-                    sudo journalctl -b -u "snap.openthread-border-router.*" --no-pager -o short-iso \
+                    sudo snap logs -n=all openthread-border-router \
                         | sed "s/^/[otbr-snap] /"
                     _section "chiptool"
                     sudo journalctl -b -u "snap.chiptool.*" --no-pager -o short-iso \
@@ -197,7 +294,7 @@ otbrstack() {
                     else
                         echo "[firstboot] /var/log/otbr-firstboot.log not found"
                     fi
-                '
+                ' | tee -a "$_otbr_log"
             fi
             ;;
         *)

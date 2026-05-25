@@ -16,6 +16,7 @@ test-vm/test-vm-key.pub
 # Log dumps (otbrstack logs output)
 *_logs.txt
 logs.txt
+logs/
 
 # Syncthing conflict files
 *.sync-conflict-*
