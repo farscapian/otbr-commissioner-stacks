@@ -67,3 +67,49 @@ fatal: unable to access 'https://github.com/espressif/esp-idf.git/': Could not r
 afb39d7 TEMP: pre-flash snapshot 2026-05-24 19:03:17
 [otbrstack] Loading env from /home/derek/projects/otbr_commissioner_stacks/pangolin.env
 [otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/projects/otbr_commissioner_stacks)
+[main 870684a] TEMP: pre-flash snapshot 2026-05-24 19:10:34
+ 1 file changed, 46 insertions(+)
+Preparing worktree (new branch 'flash/20260524-191034')
+HEAD is now at 870684a TEMP: pre-flash snapshot 2026-05-24 19:10:34
+[otbrstack] Running flash from worktree: /tmp/tmp.j2XIdt2ynZ-otbrstack-flash
+[otbrstack] Main working tree remains editable on its current branch.
+[0;32m[INFO][0m  SSH config entry found for 'dev-piotbr'.
+[0;32m[INFO][0m  Target: /dev/sdd
+NAME    SIZE TYPE MOUNTPOINT
+sdd    58.9G disk 
+|-sdd1  512M part 
+`-sdd2 58.4G part 
+
+[1;33m[WARN][0m  Ubuntu Server detected on /dev/sdd but -f given — full reflash.
+[1;33m[WARN][0m  Skipping confirmation (-y). ALL DATA ON /dev/sdd WILL BE DESTROYED.
+[1;33m[WARN][0m  SKIP_IMAGE_VERIFICATION=1 — skipping download, SHA-256, and size check.
+[0;32m[INFO][0m  Flashing to /dev/sdd ...
+2021654528 bytes (2.0 GB, 1.9 GiB) copied, 1.0013 s, 2.0 GB/s3657433088 bytes (3.7 GB, 3.4 GiB) copied, 2.01094 s, 1.8 GB/s3896508416 bytes (3.9 GB, 3.6 GiB) copied, 3.01186 s, 1.3 GB/s4060086272 bytes (4.1 GB, 3.8 GiB) copied, 4.02015 s, 1.0 GB/s4194304000 bytes (4.2 GB, 3.9 GiB) copied, 5.00192 s, 839 MB/s4311744512 bytes (4.3 GB, 4.0 GiB) copied, 6.01531 s, 717 MB/s4420796416 bytes (4.4 GB, 4.1 GiB) copied, 7.00306 s, 631 MB/s4529848320 bytes (4.5 GB, 4.2 GiB) copied, 8.04229 s, 563 MB/s4626317312 bytes (4.6 GB, 4.3 GiB) copied, 9.00605 s, 514 MB/s4722786304 bytes (4.7 GB, 4.4 GiB) copied, 10.0352 s, 471 MB/s4810866688 bytes (4.8 GB, 4.5 GiB) copied, 11.0373 s, 436 MB/s
+1160+1 records in
+1160+1 records out
+4868059648 bytes (4.9 GB, 4.5 GiB) copied, 83.0574 s, 59 MB/s
+[0;32m[INFO][0m  Flash complete. Re-reading partition table ...
+[0;32m[INFO][0m  system-boot partition: /dev/sdd1
+[0;32m[INFO][0m  Mounted /dev/sdd1 at /tmp/uc-boot-yTZif8
+[0;32m[INFO][0m  cmdline.txt not present in system-boot (expected — Ubuntu 26.04 uses GRUB/UEFI; modprobe.d covers regulatory)
+[0;32m[INFO][0m  config.txt: added country=US
+[0;32m[INFO][0m  Writing cloud-init user-data ...
+[0;32m[INFO][0m  cloud-init user-data written.
+[0;32m[INFO][0m  cloud-init artifacts saved to /tmp/tmp.j2XIdt2ynZ-otbrstack-flash/artifacts/rpi/dev-piotbr/
+[0;32m[INFO][0m  Expanding root partition to fill /dev/sdd ...
+resize2fs 1.47.2 (1-Jan-2025)
+Resizing the filesystem on /dev/sdd2 to 15318272 (4k) blocks.
+The filesystem on /dev/sdd2 is now 15318272 (4k) blocks long.
+
+[0;32m[INFO][0m  Root partition expanded.
+[0;32m[INFO][0m  Mounted root partition /dev/sdd2 — writing kernel config...
+[0;32m[INFO][0m  Written /etc/flash-kernel.conf (MACHINE=Raspberry Pi 4 Model B)
+[0;32m[INFO][0m  Seeded /var/log/otbr-firstboot.log on root partition.
+[0;32m[INFO][0m  Resolving latest ESP-IDF release tag ...
+fatal: unable to access 'https://github.com/espressif/esp-idf.git/': Could not resolve proxy: truenas0.ancapistan.io
+
+[otbrstack] Flash complete. Flash branch preserved at: flash/20260524-191034
+[otbrstack] Git HEAD at time of flash:
+870684a TEMP: pre-flash snapshot 2026-05-24 19:10:34
+[otbrstack] Loading env from /home/derek/projects/otbr_commissioner_stacks/pangolin.env
+[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/projects/otbr_commissioner_stacks)
