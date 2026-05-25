@@ -658,6 +658,8 @@ ${NETPLAN_WIFIS}
       # Proxy for git/curl — baked in at flash time from HTTP_PROXY env var.
       # git ignores uppercase HTTP_PROXY, so we export the lowercase variants.
       ${HTTP_PROXY:+export http_proxy="${HTTP_PROXY}" https_proxy="${HTTP_PROXY}"}
+      # Skip git network ops on the Pi when baked in at flash time.
+      ${PULL_LATEST_REPOS:+export PULL_LATEST_REPOS="${PULL_LATEST_REPOS}"}
 
       # Wait up to 120 s for NTP to sync.  The Pi has no RTC, so its clock
       # starts from fake-hwclock's last saved value.  git ls-remote uses
@@ -1229,32 +1231,42 @@ UDEV
             # git fetch has nothing (or almost nothing) to pull.
             # ------------------------------------------------------------------
             _IDF_CACHE="${SCRIPT_DIR}/cache/esp-idf"
-            info "Resolving latest ESP-IDF release tag ..."
-            _idf_tag=$(git ls-remote --tags --sort=-v:refname \
-                https://github.com/espressif/esp-idf.git 'v[0-9]*' \
-                | grep -oE $'\trefs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
-                | head -1 | sed 's|.*refs/tags/||')
-            [[ -n "$_idf_tag" ]] || die "Could not resolve latest ESP-IDF release tag"
-            info "Latest ESP-IDF release: $_idf_tag"
+            if [[ "${PULL_LATEST_REPOS:-1}" -ne 0 ]]; then
+                info "Resolving latest ESP-IDF release tag ..."
+                _idf_tag=$(git ls-remote --tags --sort=-v:refname \
+                    https://github.com/espressif/esp-idf.git 'v[0-9]*' \
+                    | grep -oE $'\trefs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+                    | head -1 | sed 's|.*refs/tags/||')
+                [[ -n "$_idf_tag" ]] || die "Could not resolve latest ESP-IDF release tag"
+                info "Latest ESP-IDF release: $_idf_tag"
 
-            if [[ -d "$_IDF_CACHE/.git" ]]; then
-                _idf_cur=$(git -C "$_IDF_CACHE" describe --tags --exact-match 2>/dev/null \
-                    || git -C "$_IDF_CACHE" rev-parse --short HEAD)
-                if [[ "$_idf_cur" != "$_idf_tag" ]]; then
-                    info "Updating ESP-IDF cache: $_idf_cur → $_idf_tag"
-                    git -C "$_IDF_CACHE" fetch --depth 1 origin tag "$_idf_tag"
-                    git -C "$_IDF_CACHE" checkout "$_idf_tag"
-                    git -C "$_IDF_CACHE" submodule update --init --recursive --depth 1
-                    info "ESP-IDF cache updated to $_idf_tag."
-                else
-                    info "ESP-IDF cache already at $_idf_tag."
+                if [[ -d "$_IDF_CACHE/.git" ]]; then
+                    _idf_cur=$(git -C "$_IDF_CACHE" describe --tags --exact-match 2>/dev/null \
+                        || git -C "$_IDF_CACHE" rev-parse --short HEAD)
+                    if [[ "$_idf_cur" != "$_idf_tag" ]]; then
+                        info "Updating ESP-IDF cache: $_idf_cur → $_idf_tag"
+                        git -C "$_IDF_CACHE" fetch --depth 1 origin tag "$_idf_tag"
+                        git -C "$_IDF_CACHE" checkout "$_idf_tag"
+                        git -C "$_IDF_CACHE" submodule update --init --recursive --depth 1
+                        info "ESP-IDF cache updated to $_idf_tag."
+                    else
+                        info "ESP-IDF cache already at $_idf_tag."
+                    fi
+                elif [[ ! -d "$_IDF_CACHE" ]]; then
+                    info "Cloning ESP-IDF $_idf_tag into cache ..."
+                    git -c advice.detachedHead=false clone --depth 1 --branch "$_idf_tag" \
+                        --recurse-submodules --shallow-submodules \
+                        https://github.com/espressif/esp-idf.git "$_IDF_CACHE"
+                    info "ESP-IDF cloned at $_idf_tag."
                 fi
-            elif [[ ! -d "$_IDF_CACHE" ]]; then
-                info "Cloning ESP-IDF $_idf_tag into cache ..."
-                git -c advice.detachedHead=false clone --depth 1 --branch "$_idf_tag" \
-                    --recurse-submodules --shallow-submodules \
-                    https://github.com/espressif/esp-idf.git "$_IDF_CACHE"
-                info "ESP-IDF cloned at $_idf_tag."
+            else
+                if [[ -d "$_IDF_CACHE/.git" ]]; then
+                    _idf_cur=$(git -C "$_IDF_CACHE" describe --tags --exact-match 2>/dev/null \
+                        || git -C "$_IDF_CACHE" rev-parse --short HEAD 2>/dev/null || echo 'unknown')
+                    info "PULL_LATEST_REPOS=0 — skipping ESP-IDF update; cache at: ${_idf_cur}"
+                else
+                    warn "PULL_LATEST_REPOS=0 and no ESP-IDF cache found — Pi will clone on first boot."
+                fi
             fi
 
             # ------------------------------------------------------------------
