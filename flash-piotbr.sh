@@ -832,6 +832,13 @@ ${NETPLAN_WIFIS}
 
       echo "=== OTBR first-boot \$(date) ==="
 
+      # One-shot guard: cloud-init runcmd triggers on every cloud-init run,
+      # including the tryboot second boot.  Skip if we already ran successfully.
+      if [[ -f /var/lib/otbr/firstboot-done ]]; then
+        echo "=== first-boot already completed — skipping second run ==="
+        exit 0
+      fi
+
       # Patch Pi firmware country code — authoritative for brcmfmac regulatory.
       if grep -q "^country=" /boot/firmware/config.txt 2>/dev/null; then
         sed -i "s/^country=.*/country=US/" /boot/firmware/config.txt
@@ -1072,6 +1079,10 @@ ${NETPLAN_WIFIS}
         # subsequent boots bring the agent up automatically via snapd.
         snap set "\$SNAP" autostart=true
       fi
+
+      # Mark first-boot complete so the tryboot second boot doesn't re-run us.
+      mkdir -p /var/lib/otbr
+      touch /var/lib/otbr/firstboot-done
 
       # Clean up any tryboot assets flash-kernel may have written to
       # /boot/firmware/new/ during the apt-triggered dracut/flash-kernel run.

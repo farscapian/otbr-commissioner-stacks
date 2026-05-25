@@ -265,9 +265,11 @@ otbrstack() {
                         | sed "s/^/[dmesg] /" &
                     sudo journalctl -f -u "cloud-init*" --no-pager -o short-iso \
                         | sed "s/^/[cloud-init] /" &
-                    sudo snap logs -f openthread-border-router \
+                    (until snap list openthread-border-router >/dev/null 2>&1; do
+                        sleep 10
+                    done; sudo snap logs -f openthread-border-router 2>/dev/null) \
                         | sed "s/^/[otbr-snap] /" &
-                    sudo journalctl -f -u "snap.chiptool.*" --no-pager -o short-iso \
+                    sudo journalctl -f -u "snap.chiptool.*" --no-pager -o short-iso 2>/dev/null \
                         | sed "s/^/[chiptool] /" &
                     sudo tail -f /var/log/otbr-firstboot.log 2>/dev/null \
                         | sed "s/^/[firstboot] /" &
