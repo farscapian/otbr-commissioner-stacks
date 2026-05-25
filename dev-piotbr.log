@@ -113,3 +113,17 @@ fatal: unable to access 'https://github.com/espressif/esp-idf.git/': Could not r
 870684a TEMP: pre-flash snapshot 2026-05-24 19:10:34
 [otbrstack] Loading env from /home/derek/projects/otbr_commissioner_stacks/pangolin.env
 [otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/projects/otbr_commissioner_stacks)
+[main bb3f573] TEMP: pre-flash snapshot 2026-05-24 19:27:35
+ 1 file changed, 46 insertions(+)
+Preparing worktree (new branch 'flash/20260524-192735')
+HEAD is now at bb3f573 TEMP: pre-flash snapshot 2026-05-24 19:27:35
+[otbrstack] Running flash from worktree: /tmp/tmp.KQRwfDKHKn-otbrstack-flash
+[otbrstack] Main working tree remains editable on its current branch.
+[0;32m[INFO][0m  SSH config entry found for 'dev-piotbr'.
+[0;31m[ERR ][0m  /dev/sdd has mounted partitions — unmount first.
+
+[otbrstack] Flash complete. Flash branch preserved at: flash/20260524-192735
+[otbrstack] Git HEAD at time of flash:
+bb3f573 TEMP: pre-flash snapshot 2026-05-24 19:27:35
+[otbrstack] Loading env from /home/derek/projects/otbr_commissioner_stacks/pangolin.env
+[otbrstack] Flash Ubuntu Server 26.04 to SD card  (scripts: /home/derek/projects/otbr_commissioner_stacks)
