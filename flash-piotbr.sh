@@ -959,8 +959,14 @@ ${NETPLAN_WIFIS}
         _ct_file=\$(ls /opt/chip-tool/*.snap 2>/dev/null | head -1)
         if [[ -n "\$_ct_file" ]]; then
           snap install --dangerous "\$_ct_file" || true
-        else
-          snap install chip-tool || true
+        fi
+        if ! snap list chip-tool &>/dev/null; then
+          echo "chip-tool not yet installed — installing from store ..."
+          for _i in \$(seq 1 5); do
+            snap install chip-tool --channel=${CHIP_TOOL_SNAP_CHANNEL} && break
+            echo "chip-tool install attempt \$_i failed; retrying in 15s ..."
+            sleep 15
+          done
         fi
         unset _ct_file
       fi

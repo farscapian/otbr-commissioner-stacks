@@ -249,13 +249,15 @@ otbrstack() {
                 echo "Usage: otbrstack logs [-f] <ssh_host>"
                 return 1
             fi
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_host}/ssh.log"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_host}/firstboot.log"
+            local _snap_log="${_OTBRSTACK_DIR}/logs/${_host}/otbr-snap.log"
             mkdir -p "$(dirname "$_otbr_log")"
-            echo "[otbrstack] Logs from ${_host} (appending to: ${_otbr_log})"
-            printf '\n=== otbrstack logs %s %s — %s ===\n' \
+            echo "[otbrstack] Logs from ${_host} → ${_otbr_log}"
+            local _hdr
+            _hdr=$(printf '\n=== otbrstack logs %s %s — %s ===' \
                 "$_host" "$(date '+%Y-%m-%d %H:%M:%S')" \
-                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
-                | tee -a "$_otbr_log"
+                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')")
+            printf '%s\n' "$_hdr" | tee -a "$_otbr_log" >> "$_snap_log"
             if [[ "$_follow" -eq 1 ]]; then
                 local _ssh_target
                 _ssh_target=$(ssh -G "$_host" 2>/dev/null | awk '/^hostname / {print $2; exit}')
@@ -295,7 +297,7 @@ otbrstack() {
                     sudo tail -f /var/log/otbr-firstboot.log 2>/dev/null \
                         | sed "s/^/[firstboot] /" &
                     wait
-                ' | tee -a "$_otbr_log"
+                ' | tee -a "$_otbr_log" >(grep '^\[otbr-snap\]' >> "$_snap_log")
             else
                 ssh "$_host" '
                     _section() { echo; echo "=== [$1] ==="; }
@@ -317,7 +319,7 @@ otbrstack() {
                     else
                         echo "[firstboot] /var/log/otbr-firstboot.log not found"
                     fi
-                ' | tee -a "$_otbr_log"
+                ' | tee -a "$_otbr_log" >(grep '^\[otbr-snap\]' >> "$_snap_log")
             fi
             ;;
         *)
