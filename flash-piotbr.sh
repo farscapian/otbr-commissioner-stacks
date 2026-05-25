@@ -1371,18 +1371,6 @@ SDKEOF
     fi
 fi
 
-# Patch brcmfmac NVRAM with ccode=US — the firmware reads this before
-# any kernel regulatory stack, eliminating reason -52 channel rejections.
-_nvram=\$(readlink -f /usr/lib/firmware/brcm/brcmfmac43455-sdio.raspberrypi,4-model-b.txt.zst 2>/dev/null)
-if [[ -n "\$_nvram" && -f "\$_nvram" ]]; then
-    zstd -d "\$_nvram" -o /tmp/nvram-pi4b.txt
-    printf '\nccode=US\nregrev=0\n' >> /tmp/nvram-pi4b.txt
-    zstd -19 -f /tmp/nvram-pi4b.txt -o "\$_nvram"
-    echo "[chroot] brcmfmac NVRAM patched with ccode=US"
-else
-    echo "[chroot] WARNING: brcmfmac NVRAM not found — skipping patch" >&2
-fi
-
 # Free space consumed by downloaded .deb archives and man-page cache.
 # This reclaims ~100-150 MB before snap/ESP-IDF assets are copied in.
 apt-get clean
@@ -1438,6 +1426,33 @@ CHROOTSCRIPT
             unset _built_bin _do_rcp_build
 
             fi  # SKIP_CHROOT
+
+            # ------------------------------------------------------------------
+            # Patch brcmfmac NVRAM with ccode=US on the host-mounted root
+            # partition.  The firmware reads this country code before the kernel
+            # regulatory stack initialises, eliminating reason -52 channel
+            # rejections that prevent WiFi association.  Runs unconditionally so
+            # SKIP_CHROOT=1 does not silently bypass the fix.
+            # ------------------------------------------------------------------
+            _nvram_zst=$(sudo find "$_ROOT_DIR/usr/lib/firmware/brcm" \
+                -name 'brcmfmac43455-sdio.raspberrypi,4-model-b.txt.zst' \
+                2>/dev/null | head -1)
+            if [[ -n "$_nvram_zst" ]]; then
+                if command -v zstd &>/dev/null; then
+                    _nvram_tmp=$(mktemp /tmp/nvram-pi4b-XXXXXX.txt)
+                    sudo zstd -d "$_nvram_zst" -o "$_nvram_tmp" --force -q
+                    printf '\nccode=US\nregrev=0\n' | sudo tee -a "$_nvram_tmp" > /dev/null
+                    sudo zstd -19 -f "$_nvram_tmp" -o "$_nvram_zst" -q
+                    sudo rm -f "$_nvram_tmp"
+                    unset _nvram_tmp
+                    info "brcmfmac NVRAM patched with ccode=US (eliminates reason -52 on 5GHz)"
+                else
+                    warn "zstd not found on host — brcmfmac NVRAM not patched; WiFi 5GHz may fail with reason -52"
+                fi
+            else
+                warn "brcmfmac NVRAM file not found on root partition — skipping WiFi country patch"
+            fi
+            unset _nvram_zst
 
             # ------------------------------------------------------------------
             # Download arm64 snaps from Snap Store REST API.
