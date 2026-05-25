@@ -115,30 +115,16 @@ _REAL_HOME="$(eval echo "~${_REAL_USER}")"
 _SSH_DIR="${_REAL_HOME}/.ssh"
 _SSH_CONFIG="${_SSH_DIR}/config"
 
-_ssh_has_host=0
 if [[ -f "$_SSH_CONFIG" ]] && grep -qiE "^[[:space:]]*Host[[:space:]]+.*\b${OTBR_HOSTNAME}\b" "$_SSH_CONFIG"; then
-    _ssh_has_host=1
-fi
-
-if [[ "$_ssh_has_host" -eq 1 ]]; then
     info "SSH config entry found for '${OTBR_HOSTNAME}'."
 else
-    warn "'${OTBR_HOSTNAME}' not found in ${_SSH_CONFIG}."
-    read -rp "  Add a Host entry for '${OTBR_HOSTNAME}' to ${_SSH_CONFIG}? [Y/n] " _yn
-    _yn="${_yn:-Y}"
-    if [[ "$_yn" =~ ^[Yy] ]]; then
-        mkdir -p "$_SSH_DIR"
-        chmod 700 "$_SSH_DIR"
-        chown "${_REAL_USER}:" "$_SSH_DIR"
-        printf '\nHost %s\n    User ubuntu\n' "${OTBR_HOSTNAME}" >> "$_SSH_CONFIG"
-        chmod 600 "$_SSH_CONFIG"
-        chown "${_REAL_USER}:" "$_SSH_CONFIG"
-        info "Added Host entry for '${OTBR_HOSTNAME}' to ${_SSH_CONFIG}."
-    else
-        die "Add a Host entry for '${OTBR_HOSTNAME}' to ${_SSH_CONFIG} and re-run."
-    fi
+    info "No SSH config entry for '${OTBR_HOSTNAME}' — creating stub in ${_SSH_CONFIG}."
+    mkdir -p "$_SSH_DIR" && chmod 700 "$_SSH_DIR" && chown "${_REAL_USER}:" "$_SSH_DIR"
+    printf '\nHost %s\n    HostName %s.local\n    User ubuntu\n' \
+        "${OTBR_HOSTNAME}" "${OTBR_HOSTNAME}" >> "$_SSH_CONFIG"
+    chmod 600 "$_SSH_CONFIG" && chown "${_REAL_USER}:" "$_SSH_CONFIG"
 fi
-unset _REAL_USER _REAL_HOME _SSH_DIR _SSH_CONFIG _ssh_has_host _yn
+unset _REAL_USER _REAL_HOME _SSH_DIR _SSH_CONFIG
 
 # Refuse to flash a device that has any partition currently mounted
 if lsblk -no MOUNTPOINT "$TARGET_DEV" 2>/dev/null | grep -q .; then

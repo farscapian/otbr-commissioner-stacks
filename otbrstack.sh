@@ -4,6 +4,34 @@
 
 _OTBRSTACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Append a minimal Host block to ~/.ssh/config for $1 if none exists.
+_otbrstack_ensure_ssh_config() {
+    local _host="$1"
+    local _ssh_cfg="${HOME}/.ssh/config"
+    mkdir -p "${HOME}/.ssh" && chmod 700 "${HOME}/.ssh"
+    [[ -f "$_ssh_cfg" ]] || { touch "$_ssh_cfg"; chmod 600 "$_ssh_cfg"; }
+    if grep -qE "^[[:space:]]*Host[[:space:]]+${_host}([[:space:]]|$)" "$_ssh_cfg" 2>/dev/null; then
+        return 0
+    fi
+    echo "[otbrstack] No SSH config entry for '${_host}' — appending stub to ${_ssh_cfg}"
+    printf '\nHost %s\n    HostName %s.local\n    User ubuntu\n' "$_host" "$_host" >> "$_ssh_cfg"
+    chmod 600 "$_ssh_cfg"
+}
+
+# Remove $1 (and its resolved HostName) from ~/.ssh/known_hosts.
+_otbrstack_remove_known_host() {
+    local _host="$1"
+    local _known="${HOME}/.ssh/known_hosts"
+    [[ -f "$_known" ]] || return 0
+    echo "[otbrstack] Removing stale host keys for '${_host}' from known_hosts ..."
+    ssh-keygen -f "$_known" -R "$_host" 2>/dev/null || true
+    local _resolved
+    _resolved=$(ssh -G "$_host" 2>/dev/null | awk '/^hostname / {print $2; exit}')
+    if [[ -n "$_resolved" && "$_resolved" != "$_host" ]]; then
+        ssh-keygen -f "$_known" -R "$_resolved" 2>/dev/null || true
+    fi
+}
+
 otbrstack() {
     local cmd="${1:-}"
 
@@ -176,6 +204,9 @@ otbrstack() {
                 rm -rf "${_flash_wt:?}/$_d"
                 ln -s "$_OTBRSTACK_DIR/$_d" "$_flash_wt/$_d"
             done
+            if [[ "$_flash_log_host" != "otbr" ]]; then
+                _otbrstack_ensure_ssh_config "$_flash_log_host"
+            fi
             echo "[otbrstack] Running flash from worktree: ${_flash_wt}"
             echo "[otbrstack] Main working tree remains editable on its current branch."
             printf '\n=== otbrstack flash %s — %s [branch: %s] ===\n' \
@@ -193,6 +224,9 @@ otbrstack() {
             echo "[otbrstack] Flash complete. Flash branch preserved at: ${_flash_branch}"
             echo "[otbrstack] Git HEAD at time of flash:"
             git -C "$_OTBRSTACK_DIR" log -1 --oneline "$_flash_branch"
+            if [[ "$_flash_log_host" != "otbr" ]]; then
+                _otbrstack_remove_known_host "$_flash_log_host"
+            fi
             return $_flash_rc
             ;;
         docker)
@@ -225,8 +259,9 @@ otbrstack() {
                 echo "Usage: otbrstack shutdown <ssh_host>"
                 return 1
             fi
+            _otbrstack_ensure_ssh_config "$_host"
             echo "[otbrstack] Shutting down ${_host} ..."
-            ssh "$_host" -- sudo shutdown -h now
+            ssh -o StrictHostKeyChecking=accept-new "$_host" -- sudo shutdown -h now
             ;;
         restart)
             local _host="${_pass_args[0]:-}"
@@ -234,8 +269,9 @@ otbrstack() {
                 echo "Usage: otbrstack restart <ssh_host>"
                 return 1
             fi
+            _otbrstack_ensure_ssh_config "$_host"
             echo "[otbrstack] Restarting ${_host} ..."
-            ssh "$_host" -- sudo reboot
+            ssh -o StrictHostKeyChecking=accept-new "$_host" -- sudo reboot
             ;;
         logs)
             local _follow=0 _host=""
@@ -249,6 +285,7 @@ otbrstack() {
                 echo "Usage: otbrstack logs [-f] <ssh_host>"
                 return 1
             fi
+            _otbrstack_ensure_ssh_config "$_host"
             local _otbr_log="${_OTBRSTACK_DIR}/logs/${_host}/firstboot.log"
             local _snap_log="${_OTBRSTACK_DIR}/logs/${_host}/otbr-snap.log"
             mkdir -p "$(dirname "$_otbr_log")"
@@ -281,7 +318,7 @@ otbrstack() {
                         return 1
                     fi
                 fi
-                ssh -t "$_host" '
+                ssh -t -o StrictHostKeyChecking=accept-new "$_host" '
                     _cleanup() { kill $(jobs -p) 2>/dev/null; }
                     trap _cleanup EXIT INT TERM
                     sudo journalctl -f -k --no-pager -o short-iso \
@@ -299,7 +336,7 @@ otbrstack() {
                     wait
                 ' | tee -a "$_otbr_log" >(grep '^\[otbr-snap\]' >> "$_snap_log")
             else
-                ssh "$_host" '
+                ssh -o StrictHostKeyChecking=accept-new "$_host" '
                     _section() { echo; echo "=== [$1] ==="; }
                     _section "dmesg"
                     sudo journalctl -b -k --no-pager -o short-iso \
