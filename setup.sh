@@ -102,17 +102,36 @@ install_esptool() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Incus (VM/container path) — informational only
+# 3. Incus (VM/container path) — install and initialize if absent
 # ---------------------------------------------------------------------------
 
-check_incus() {
+install_incus() {
     info "3. Checking incus ..."
 
-    if command -v incus &>/dev/null; then
-        success "incus available: $(incus --version)"
+    if ! command -v incus &>/dev/null; then
+        info "incus not found — installing via apt ..."
+        sudo apt-get update -q
+        sudo apt-get install -y incus
+        success "incus installed: $(incus --version)"
     else
-        warn "incus not found. Install it from https://linuxcontainers.org/incus/docs/main/installing/"
-        warn "Required only for: otbrstack vm x86"
+        success "incus available: $(incus --version)"
+    fi
+
+    # Add current user to the incus-admin group if not already a member.
+    if ! groups | grep -qw incus-admin; then
+        info "Adding ${USER} to the incus-admin group ..."
+        sudo usermod -aG incus-admin "$USER"
+        warn "Group membership change takes effect in a new login session."
+        warn "For this session, commands will run via 'sudo -g incus-admin incus ...' if needed."
+    fi
+
+    # Initialize incus if it has not been configured yet.
+    if ! incus info &>/dev/null 2>&1; then
+        info "Initializing incus with auto preset ..."
+        sudo incus admin init --auto
+        success "incus initialized."
+    else
+        success "incus already initialized."
     fi
 }
 
@@ -138,7 +157,7 @@ setup_bashrc() {
 
 install_apt_packages
 install_esptool
-check_incus
+install_incus
 setup_bashrc
 
 echo ""
