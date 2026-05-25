@@ -2,7 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG="$SCRIPT_DIR/dev-piotbr.log"
 HOSTNAME_FLAG="dev-piotbr"
 DEVICE=""   # auto-detected from SD_CARD_PATHS unless --device= is given
 YES=0
@@ -71,11 +70,15 @@ if [[ -z "$DEVICE" ]]; then
     fi
 fi
 
-# Unified log: all output goes to terminal AND dev-piotbr.log (fresh each run)
+# Unified log: all output goes to terminal AND logs/<host>/cycle.log (fresh each run)
+LOG="$SCRIPT_DIR/logs/${HOSTNAME_FLAG}/cycle.log"
+mkdir -p "$(dirname "$LOG")"
 exec > >(tee "$LOG") 2>&1
 
-echo "=== run_rpiotbr_cycle.sh $(date '+%Y-%m-%d %H:%M:%S') ==="
+_git_info=$(git -C "$SCRIPT_DIR" log -1 --oneline 2>/dev/null || echo "no git")
+echo "=== run_rpiotbr_cycle.sh $(date '+%Y-%m-%d %H:%M:%S') — ${_git_info} ==="
 echo "Device: $DEVICE  Hostname: $HOSTNAME_FLAG  Skip-prompt: $YES"
+unset _git_info
 echo ""
 
 # ---------------------------------------------------------------------------

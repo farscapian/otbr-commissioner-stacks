@@ -106,9 +106,13 @@ otbrstack() {
                     --name=*)    _vm_log_name="${_a#--name=}" ;;
                 esac
             done
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_vm_log_name}.log"
-            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_vm_log_name}/vm.log"
+            mkdir -p "$(dirname "$_otbr_log")"
             echo "[otbrstack] Logging to: ${_otbr_log}"
+            printf '\n=== otbrstack vm %s %s — %s ===\n' \
+                "$_arch" "$(date '+%Y-%m-%d %H:%M:%S')" \
+                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
+                | tee -a "$_otbr_log"
 
             case "$_arch" in
                 x64|x86_64)
@@ -145,8 +149,8 @@ otbrstack() {
             for _a in "${_pass_args[@]+"${_pass_args[@]}"}"; do
                 case "$_a" in --hostname=*) _flash_log_host="${_a#--hostname=}" ;; esac
             done
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_flash_log_host}.log"
-            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_flash_log_host}/flash.log"
+            mkdir -p "$(dirname "$_otbr_log")"
             echo "[otbrstack] Logging to: ${_otbr_log}"
 
             # Commit any pending changes to the current branch first.
@@ -174,6 +178,11 @@ otbrstack() {
             done
             echo "[otbrstack] Running flash from worktree: ${_flash_wt}"
             echo "[otbrstack] Main working tree remains editable on its current branch."
+            printf '\n=== otbrstack flash %s — %s [branch: %s] ===\n' \
+                "$(date '+%Y-%m-%d %H:%M:%S')" \
+                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
+                "$_flash_branch" \
+                | tee -a "$_otbr_log"
             { "$_flash_wt/flash-piotbr.sh" "${_pass_args[@]+"${_pass_args[@]}"}"; } 2>&1 \
                 | tee -a "$_otbr_log"
             local _flash_rc="${PIPESTATUS[0]}"
@@ -188,17 +197,25 @@ otbrstack() {
             ;;
         docker)
             echo "[otbrstack] Docker bare-metal provisioner"
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/$(hostname).log"
-            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/$(hostname)/docker.log"
+            mkdir -p "$(dirname "$_otbr_log")"
             echo "[otbrstack] Logging to: ${_otbr_log}"
+            printf '\n=== otbrstack docker %s — %s ===\n' \
+                "$(date '+%Y-%m-%d %H:%M:%S')" \
+                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
+                | tee -a "$_otbr_log"
             { "$_OTBRSTACK_DIR/otbr-docker-setup.sh" "${_pass_args[@]+"${_pass_args[@]}"}"; } 2>&1 \
                 | tee -a "$_otbr_log"
             ;;
         snap)
             echo "[otbrstack] Snap bare-metal provisioner"
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/$(hostname).log"
-            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/$(hostname)/snap.log"
+            mkdir -p "$(dirname "$_otbr_log")"
             echo "[otbrstack] Logging to: ${_otbr_log}"
+            printf '\n=== otbrstack snap %s — %s ===\n' \
+                "$(date '+%Y-%m-%d %H:%M:%S')" \
+                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
+                | tee -a "$_otbr_log"
             { "$_OTBRSTACK_DIR/otbr-snap-setup.sh" "${_pass_args[@]+"${_pass_args[@]}"}"; } 2>&1 \
                 | tee -a "$_otbr_log"
             ;;
@@ -232,9 +249,13 @@ otbrstack() {
                 echo "Usage: otbrstack logs [-f] <ssh_host>"
                 return 1
             fi
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_host}.log"
-            mkdir -p "${_OTBRSTACK_DIR}/logs"
+            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_host}/ssh.log"
+            mkdir -p "$(dirname "$_otbr_log")"
             echo "[otbrstack] Logs from ${_host} (appending to: ${_otbr_log})"
+            printf '\n=== otbrstack logs %s %s — %s ===\n' \
+                "$_host" "$(date '+%Y-%m-%d %H:%M:%S')" \
+                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
+                | tee -a "$_otbr_log"
             if [[ "$_follow" -eq 1 ]]; then
                 local _ssh_target
                 _ssh_target=$(ssh -G "$_host" 2>/dev/null | awk '/^hostname / {print $2; exit}')
