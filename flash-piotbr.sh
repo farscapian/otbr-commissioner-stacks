@@ -1531,8 +1531,8 @@ print(snap_id, '', '', '')
             if [[ -f "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" ]]; then
                 sudo mkdir -p "$_ROOT_DIR/var/lib/otbr"
                 sudo cp "${SCRIPT_DIR}/cache/esp32/rcp/esp_ot_rcp.bin" \
-                    "$_ROOT_DIR/var/lib/otbr/"
-                info "RCP binary pre-loaded: /var/lib/otbr/esp_ot_rcp.bin"
+                    "$_ROOT_DIR/var/lib/otbr/esp_ot_rcp_staged.bin"
+                info "RCP binary staged: /var/lib/otbr/esp_ot_rcp_staged.bin"
             fi
 
             # OTBR snap at /opt/otbr-snap/ — firstboot.sh installs with --dangerous.

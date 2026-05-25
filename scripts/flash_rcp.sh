@@ -46,6 +46,10 @@ done
 IDF_DIR="${IDF_DIR:-${_SCRIPT_DIR}/../cache/esp-idf}"
 IDF_TOOLS_PATH="${IDF_TOOLS_PATH:-${HOME}/.espressif}"
 RCP_BIN_CACHE="${RCP_BIN_CACHE:-${_SCRIPT_DIR}/../cache/esp32/rcp/esp_ot_rcp.bin}"
+# Staged binary pre-loaded at flash time — used only to restore the build
+# artefact without a full rebuild.  Separate from RCP_BIN_CACHE so that the
+# flash-skip decision (cache == last-flashed) is not spoofed by the pre-load.
+RCP_BIN_STAGED="${RCP_BIN_STAGED:-/var/lib/otbr/esp_ot_rcp_staged.bin}"
 
 log() { echo "[flash-rcp] $*"; }
 die() { echo "[flash-rcp] ERROR: $*" >&2; exit 1; }
@@ -183,14 +187,18 @@ fi
 _built="${_ot_rcp_dir}/build/esp_ot_rcp.bin"
 
 if [[ "$_src_changed" -eq 1 || ! -f "$_built" ]]; then
-    # Optimisation: if source is unchanged and the cache binary exists, restore
-    # it to the build location instead of rebuilding from scratch.  This handles
-    # the case where build/ was cleaned (e.g. SD card pre-seeding excludes it)
-    # but the cached binary was built from the same source version.
+    # Optimisation: if source is unchanged, restore the build artefact instead
+    # of rebuilding from scratch.  Prefer the flash cache (tracks what the
+    # device currently has); fall back to the staged binary pre-loaded at flash
+    # time (separate path so it doesn't spoof the flash-skip decision).
     if [[ "$_src_changed" -eq 0 && -f "$RCP_BIN_CACHE" ]]; then
         log "Source unchanged — restoring binary from cache (skipping rebuild)."
         mkdir -p "$(dirname "$_built")"
         cp "$RCP_BIN_CACHE" "$_built"
+    elif [[ "$_src_changed" -eq 0 && -f "$RCP_BIN_STAGED" ]]; then
+        log "Source unchanged — restoring binary from staged pre-load (skipping rebuild)."
+        mkdir -p "$(dirname "$_built")"
+        cp "$RCP_BIN_STAGED" "$_built"
     else
         log "Building ot_rcp for esp32c6 ..."
         (
