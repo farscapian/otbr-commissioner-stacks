@@ -964,6 +964,25 @@ ${NETPLAN_WIFIS}
       # install hook) keeps all services stopped until we explicitly start them.
       snap enable "\${SNAP}" 2>/dev/null || true
 
+      # -- Silence AppArmor devmode audit noise for ttyACM0 ------------------
+      # The snap runs in --devmode (needed for ip6tables/ipset CAP_NET_ADMIN).
+      # Devmode logs every access that strict mode would deny; the serial-port
+      # plug is not connected to a slot covering /dev/ttyACM*, so every Spinel
+      # read generates an ALLOWED audit record.  Adding an explicit allow via
+      # the local override stops AppArmor from auditing these reads.
+      # /etc/apparmor.d/local/ is #include'd by the snap-generated profile and
+      # survives snap refreshes — snapd regenerates the profile but always
+      # re-includes this directory.
+      mkdir -p /etc/apparmor.d/local
+      cat > /etc/apparmor.d/local/snap.openthread-border-router.otbr-agent <<'AAEOF'
+  # Explicit allow for USB CDC-ACM RCP (ESP32-C6); suppresses devmode audit noise.
+  /dev/ttyACM* rw,
+AAEOF
+      _aa_profile=/var/lib/snapd/apparmor/profiles/snap.openthread-border-router.otbr-agent
+      if [[ -f "\$_aa_profile" ]]; then
+          apparmor_parser -r "\$_aa_profile" 2>/dev/null || true
+      fi
+
       # -- Update/flash RCP firmware; sets snap radio-url ------------------
       mkdir -p /var/lib/otbr
       /usr/local/sbin/otbr-rcp-update.sh
