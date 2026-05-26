@@ -177,9 +177,15 @@ otbrstack() {
             for _a in "${_pass_args[@]+"${_pass_args[@]}"}"; do
                 case "$_a" in --hostname=*) _flash_log_host="${_a#--hostname=}" ;; esac
             done
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_flash_log_host}/flash.log"
-            mkdir -p "$(dirname "$_otbr_log")"
-            echo "[otbrstack] Logging to: ${_otbr_log}"
+            # Capture timestamp once — shared by the git branch name and log directory
+            # so both are always in sync.
+            local _flash_ts
+            _flash_ts="$(date '+%Y%m%d-%H%M%S')"
+            local _flash_log_slug="flash-${_flash_ts}"
+            local _flash_log_dir="${_OTBRSTACK_DIR}/logs/${_flash_log_host}/${_flash_log_slug}"
+            local _otbr_log="${_flash_log_dir}/flash.log"
+            mkdir -p "$_flash_log_dir"
+            echo "[otbrstack] Log directory: ${_flash_log_dir}"
 
             # Commit any pending changes to the current branch first.
             (
@@ -193,7 +199,7 @@ otbrstack() {
             # its current branch and remains fully editable while flashing runs.
             # The worktree gets its own checkout of a flash branch; cache/ and
             # artifacts/ are symlinked in so both share the same downloaded files.
-            local _flash_branch="flash/$(date '+%Y%m%d-%H%M%S')"
+            local _flash_branch="flash/${_flash_ts}"
             local _flash_wt
             _flash_wt=$(mktemp -d --suffix="-otbrstack-flash")
             git -C "$_OTBRSTACK_DIR" worktree add "$_flash_wt" -b "$_flash_branch"
@@ -207,12 +213,15 @@ otbrstack() {
             if [[ "$_flash_log_host" != "otbr" ]]; then
                 _otbrstack_ensure_ssh_config "$_flash_log_host"
             fi
+            # Point 'current' at this session so 'otbrstack logs' writes here.
+            ln -sfn "$_flash_log_slug" "${_OTBRSTACK_DIR}/logs/${_flash_log_host}/current"
             echo "[otbrstack] Running flash from worktree: ${_flash_wt}"
             echo "[otbrstack] Main working tree remains editable on its current branch."
-            printf '\n=== otbrstack flash %s — %s [branch: %s] ===\n' \
+            printf '\n=== otbrstack flash %s — %s [branch: %s] [logs: %s] ===\n' \
                 "$(date '+%Y-%m-%d %H:%M:%S')" \
                 "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
                 "$_flash_branch" \
+                "$_flash_log_dir" \
                 | tee -a "$_otbr_log"
             { "$_flash_wt/flash-piotbr.sh" "${_pass_args[@]+"${_pass_args[@]}"}"; } 2>&1 \
                 | tee -a "$_otbr_log"
@@ -286,14 +295,24 @@ otbrstack() {
                 return 1
             fi
             _otbrstack_ensure_ssh_config "$_host"
-            local _otbr_log="${_OTBRSTACK_DIR}/logs/${_host}/firstboot.log"
-            local _snap_log="${_OTBRSTACK_DIR}/logs/${_host}/otbr-snap.log"
-            mkdir -p "$(dirname "$_otbr_log")"
-            echo "[otbrstack] Logs from ${_host} → ${_otbr_log}"
+            # Use the 'current' symlink left by 'otbrstack flash'; fall back to
+            # the bare host directory if no flash has been run from this machine.
+            local _log_base="${_OTBRSTACK_DIR}/logs/${_host}"
+            local _log_session_dir
+            if [[ -L "${_log_base}/current" ]]; then
+                _log_session_dir="${_log_base}/$(readlink "${_log_base}/current")"
+            else
+                _log_session_dir="${_log_base}"
+            fi
+            local _otbr_log="${_log_session_dir}/firstboot.log"
+            local _snap_log="${_log_session_dir}/otbr-snap.log"
+            mkdir -p "$_log_session_dir"
+            echo "[otbrstack] Logs from ${_host} → ${_log_session_dir}/"
             local _hdr
-            _hdr=$(printf '\n=== otbrstack logs %s %s — %s ===' \
+            _hdr=$(printf '\n=== otbrstack logs %s %s — %s [session: %s] ===' \
                 "$_host" "$(date '+%Y-%m-%d %H:%M:%S')" \
-                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')")
+                "$(git -C "$_OTBRSTACK_DIR" log -1 --oneline 2>/dev/null || echo 'no git')" \
+                "$(basename "$_log_session_dir")")
             printf '%s\n' "$_hdr" | tee -a "$_otbr_log" >> "$_snap_log"
             if [[ "$_follow" -eq 1 ]]; then
                 local _ssh_target
