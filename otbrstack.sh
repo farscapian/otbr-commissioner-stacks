@@ -18,6 +18,24 @@ _otbrstack_ensure_ssh_config() {
     chmod 600 "$_ssh_cfg"
 }
 
+# Monitor a log stream and alert when the OTBR agent stops or crashes.
+# Runs as a process substitution alongside tee; writes to /dev/tty so alerts
+# appear on the operator's screen even though stdout is being piped.
+# Two alert methods:
+#   1. Terminal BEL (\a) — audible beep in GNOME Terminal / any external terminal
+#      (VSCodium integrated terminal shows a visual bell icon only, no sound)
+#   2. notify-send — desktop notification with critical urgency (works everywhere)
+_otbrstack_alert_on_otbr_down() {
+    grep --line-buffered -E \
+        '\[otbr-snap\].*(Stopped snap\.openthread-border-router\.otbr-agent|Main process exited|spinel_driver\.cpp.*Failure|HandleRcpTimeout)' \
+    | while IFS= read -r _line; do
+        printf '\a\a\a\n\033[1;31m*** OTBR AGENT DOWN ***\033[0m %s\n' "$_line" > /dev/tty
+        if command -v notify-send &>/dev/null; then
+            notify-send -u critical -t 0 "OTBR Agent Down" "$_line" 2>/dev/null || true
+        fi
+    done
+}
+
 # Remove $1 (and its resolved HostName) from ~/.ssh/known_hosts.
 _otbrstack_remove_known_host() {
     local _host="$1"
@@ -353,7 +371,9 @@ otbrstack() {
                     sudo tail -f /var/log/otbr-firstboot.log 2>/dev/null \
                         | sed "s/^/[firstboot] /" &
                     wait
-                ' | tee -a "$_otbr_log" >(grep '^\[otbr-snap\]' >> "$_snap_log")
+                ' | tee -a "$_otbr_log" \
+                    >(grep '^\[otbr-snap\]' >> "$_snap_log") \
+                    >(_otbrstack_alert_on_otbr_down)
             else
                 ssh -o StrictHostKeyChecking=accept-new "$_host" '
                     _section() { echo; echo "=== [$1] ==="; }
