@@ -662,9 +662,10 @@ ${NETPLAN_WIFIS}
       systemctl stop ModemManager 2>/dev/null || true
       sleep 1
 
-      # Wait up to 60 s for an ESP32-C6 (idVendor=303a) on ttyACM*.
+      # Wait indefinitely for an ESP32-C6 (idVendor=303a) on ttyACM*.
       RCP=""
-      for _i in \$(seq 1 30); do
+      _i=0
+      while [[ -z "\$RCP" ]]; do
         for _dev in /dev/ttyACM*; do
           [[ -c "\$_dev" ]] || continue
           _base=\$(basename "\$_dev")
@@ -673,16 +674,15 @@ ${NETPLAN_WIFIS}
             _usb=\$(dirname "\$_usb")
           done
           if [[ -f "\$_usb/idVendor" ]] && [[ "\$(cat "\$_usb/idVendor")" == "303a" ]]; then
-            RCP="\$_dev"; break 2
+            RCP="\$_dev"; break
           fi
         done
-        log "Waiting for ESP32-C6 (\${_i}/30)..."
-        sleep 2
+        if [[ -z "\$RCP" ]]; then
+          _i=\$(( _i + 1 ))
+          log "Waiting for ESP32-C6 (\${_i})..."
+          sleep 2
+        fi
       done
-
-      if [[ -z "\$RCP" ]]; then
-        log "ERROR: no ESP32-C6 found after 60 s"; exit 1
-      fi
       log "ESP32-C6 detected: \$RCP"
 
       mkdir -p /var/lib/otbr
