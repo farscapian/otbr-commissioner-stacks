@@ -10,7 +10,7 @@ _otbrstack_ensure_ssh_config() {
     local _ssh_cfg="${HOME}/.ssh/config"
     mkdir -p "${HOME}/.ssh" && chmod 700 "${HOME}/.ssh"
     [[ -f "$_ssh_cfg" ]] || { touch "$_ssh_cfg"; chmod 600 "$_ssh_cfg"; }
-    if grep -qE "^[[:space:]]*Host[[:space:]]+${_host}([[:space:]]|$)" "$_ssh_cfg" 2>/dev/null; then
+    if grep -qE "^Host[[:space:]]+${_host}([[:space:]]|$)" "$_ssh_cfg" 2>/dev/null; then
         return 0
     fi
     echo "[otbrstack] No SSH config entry for '${_host}' — appending stub to ${_ssh_cfg}"

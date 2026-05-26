@@ -115,7 +115,7 @@ _REAL_HOME="$(eval echo "~${_REAL_USER}")"
 _SSH_DIR="${_REAL_HOME}/.ssh"
 _SSH_CONFIG="${_SSH_DIR}/config"
 
-if [[ -f "$_SSH_CONFIG" ]] && grep -qiE "^[[:space:]]*Host[[:space:]]+.*\b${OTBR_HOSTNAME}\b" "$_SSH_CONFIG"; then
+if [[ -f "$_SSH_CONFIG" ]] && grep -qE "^Host[[:space:]]+${OTBR_HOSTNAME}([[:space:]]|$)" "$_SSH_CONFIG"; then
     info "SSH config entry found for '${OTBR_HOSTNAME}'."
 else
     info "No SSH config entry for '${OTBR_HOSTNAME}' — creating stub in ${_SSH_CONFIG}."
