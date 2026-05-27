@@ -76,6 +76,8 @@ SSH_PUBKEY="${SSH_PUBKEY:-}"
 OTBR_SNAP_CHANNEL="${OTBR_SNAP_CHANNEL:-latest/edge}"
 CHIP_TOOL_SNAP_CHANNEL="${CHIP_TOOL_SNAP_CHANNEL:-latest/stable}"
 SSH_MGMT_CIDRS="${SSH_MGMT_CIDRS:-}"
+# Set MATTER_SERVER=0 in your env file to skip python-matter-server installation.
+MATTER_SERVER="${MATTER_SERVER:-1}"
 
 THREAD_DATASET_TLV="${THREAD_DATASET_TLV:?'Set THREAD_DATASET_TLV in the env file'}"
 
@@ -1038,6 +1040,10 @@ AAEOF
       ufw allow 5353/udp comment 'mDNS'
       # Thread mesh interface — allow all traffic on wpan0
       ufw allow in on wpan0 comment 'Thread mesh (wpan0)'
+      # Matter Server WebSocket API (Home Assistant or other controller connects here)
+      if [[ "${MATTER_SERVER}" -eq 1 ]]; then
+        ufw allow 5580/tcp comment 'Matter Server WebSocket'
+      fi
       ufw --force enable
       echo "UFW enabled."
 
@@ -1093,6 +1099,23 @@ AAEOF
         snap set "\$SNAP" autostart=true
       fi
 
+      # -- Install python-matter-server -----------------------------------------
+      # Provides a WebSocket Matter controller on port 5580.
+      # Home Assistant can point its Matter integration at ws://<hostname>:5580
+      # to control Thread devices through this fabric instead of its local one.
+      if [[ "${MATTER_SERVER}" -eq 1 ]]; then
+        echo "Installing python-matter-server ..."
+        apt-get install -y --no-install-recommends bluetooth
+        python3 -m venv /var/lib/matter-server/venv
+        /var/lib/matter-server/venv/bin/pip install --upgrade pip wheel
+        /var/lib/matter-server/venv/bin/pip install 'python-matter-server[server]'
+        mkdir -p /var/lib/matter-server/state
+        systemctl daemon-reload
+        systemctl enable matter-server.service
+        systemctl start matter-server.service
+        echo "matter-server running on ws://\$(hostname -I | awk '{print \$1}'):5580"
+      fi
+
       # Mark first-boot complete so the tryboot second boot doesn't re-run us.
       mkdir -p /var/lib/otbr
       touch /var/lib/otbr/firstboot-done
@@ -1104,6 +1127,27 @@ AAEOF
       rm -rf /boot/firmware/new/ 2>/dev/null || true
 
       echo "OTBR first-boot complete."
+
+  - path: /etc/systemd/system/matter-server.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Matter Server (python-matter-server)
+      Documentation=https://github.com/home-assistant-libs/python-matter-server
+      After=network-online.target bluetooth.service snap.openthread-border-router.otbr-agent.service
+      Wants=network-online.target bluetooth.service
+
+      [Service]
+      Type=simple
+      ExecStart=/var/lib/matter-server/venv/bin/matter-server --storage-path /var/lib/matter-server/state --port 5580 --log-level info
+      Restart=on-failure
+      RestartSec=10
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
 
 # --------------------------------------------------------------------------
 # 9.3 runcmd — executes after write_files and snap modules
