@@ -76,8 +76,8 @@ SSH_PUBKEY="${SSH_PUBKEY:-}"
 OTBR_SNAP_CHANNEL="${OTBR_SNAP_CHANNEL:-latest/edge}"
 CHIP_TOOL_SNAP_CHANNEL="${CHIP_TOOL_SNAP_CHANNEL:-latest/stable}"
 SSH_MGMT_CIDRS="${SSH_MGMT_CIDRS:-}"
-# Set MATTER_SERVER=0 in your env file to skip python-matter-server installation.
-MATTER_SERVER="${MATTER_SERVER:-1}"
+# Set DEPLOY_MATTER_SERVER=0 in your env file to skip python-matter-server installation.
+DEPLOY_MATTER_SERVER="${DEPLOY_MATTER_SERVER:-1}"
 
 THREAD_DATASET_TLV="${THREAD_DATASET_TLV:?'Set THREAD_DATASET_TLV in the env file'}"
 
@@ -1041,7 +1041,7 @@ AAEOF
       # Thread mesh interface — allow all traffic on wpan0
       ufw allow in on wpan0 comment 'Thread mesh (wpan0)'
       # Matter Server WebSocket API (Home Assistant or other controller connects here)
-      if [[ "${MATTER_SERVER}" -eq 1 ]]; then
+      if [[ "${DEPLOY_MATTER_SERVER}" -eq 1 ]]; then
         ufw allow 5580/tcp comment 'Matter Server WebSocket'
       fi
       ufw --force enable
@@ -1103,7 +1103,7 @@ AAEOF
       # Provides a WebSocket Matter controller on port 5580.
       # Home Assistant can point its Matter integration at ws://<hostname>:5580
       # to control Thread devices through this fabric instead of its local one.
-      if [[ "${MATTER_SERVER}" -eq 1 ]]; then
+      if [[ "${DEPLOY_MATTER_SERVER}" -eq 1 ]]; then
         echo "Installing python-matter-server ..."
         apt-get install -y --no-install-recommends bluetooth
         python3 -m venv /var/lib/matter-server/venv
